@@ -1,0 +1,8 @@
+{
+  "leg": "claude-security-review",
+  "model": "claude-fable-5",
+  "reviewed_diff_sha256": "56c8167f31ccc1a5ad89a1d25f41b4336dc76bb28ba45e00d30487befd1bd6c7",
+  "reviewed_at": "2026-07-24",
+  "raw_output": "Lane 2 security (Claude, Fable 5). NO FINDINGS. Additive schema (new table + nullable FK), no new route/endpoint (write-API is Lane 3), no dependency, no logging (T-16), no workflows/gate-script change. T-04 the new surface: product name/brand/form \u2192 predictor_label \u2192 report_service._weekly_factor_item wraps the WHOLE label in _esc(html.escape) at :635 (verified by code path + runtime probe with <script>/<img> payloads in name/brand/form \u2192 neutralized); SPA renders via JSX auto-escape, no dangerouslySetInnerHTML.\n\n--- Review history / delta ---\nThree re-review rounds. Round 1 (Claude+Codex @ pre-fix): Codex P2s dose_mg=None\u21920.0 and label collision \u2192 FIXED. Round 2 (Claude re-run SHIP + Codex): Codex P2 supplement-timing clock mismatch (bedtime <6 vs consumption <4) \u2192 FIXED via _bedtime_clock_hour (commit 3369ad6). Round 3 (Codex @ 3369ad6): Codex review P2 = Alembic 005 breaks offline --sql generation \u2192 validated real but non-blocking (online migration path verified via live upgrade/downgrade round-trip; offline --sql not used operationally) \u2192 deferred to issue #166. Claude review+security reviewed 24e745e (SHIP, no defects, T-04 runtime-probed); the only delta since is the isolated timing-clock fix + its discriminating test + this note \u2014 full suite re-verified green (588 passed, mypy/ruff/format 0). Codex review+security ran at the final head 3369ad6.",
+  "findings": []
+}
