@@ -107,8 +107,15 @@ def _load_allowlist(path: Path) -> list[dict[str, Any]]:
     for entry in data:
         if not isinstance(entry, dict) or not {"id", "reason", "expires"} <= set(entry):
             raise SystemExit(f"{path}: each entry needs id, reason, expires -- got {entry}")
-        if not (isinstance(entry["id"], str) and entry["id"].strip()):
-            raise SystemExit(f"{path}: entry 'id' must be a non-empty string -- got {entry}")
+        # ids MUST be real GHSA ids. This is what keeps the fail-closed
+        # guarantee honest: an advisory with no GHSA url is keyed UNMAPPED:<..>
+        # in _advisories, and because that is not a GHSA id it can never be
+        # placed on the allowlist -- so unmappable advisories always block
+        # (Codex P2). Also blocks blank/non-string ids.
+        if not (isinstance(entry["id"], str) and _GHSA.fullmatch(entry["id"])):
+            raise SystemExit(
+                f"{path}: entry 'id' must be a GHSA id (GHSA-xxxx-xxxx-xxxx) -- got {entry}"
+            )
         # A blank reason would suppress an advisory with no written justification,
         # defeating the point of the allowlist (Codex P2). Require real text.
         if not (isinstance(entry["reason"], str) and entry["reason"].strip()):

@@ -144,6 +144,30 @@ class TestAllowlistLoading:
         with pytest.raises(SystemExit):
             gate._load_allowlist(p)
 
+    @pytest.mark.parametrize("bad_id", ["UNMAPPED:1234", "CVE-2024-1234", "GHSA-short", "random"])
+    def test_non_ghsa_id_rejected(self, tmp_path: Path, bad_id: str) -> None:
+        # The fail-closed guarantee: a non-GHSA id (esp. a synthetic UNMAPPED
+        # one) can NEVER be allowlisted, so unmappable advisories keep blocking.
+        p = tmp_path / "a.json"
+        p.write_text(json.dumps([{"id": bad_id, "reason": "x", "expires": "2026-10-22"}]))
+        with pytest.raises(SystemExit):
+            gate._load_allowlist(p)
+
+    def test_unmappable_cannot_be_suppressed_end_to_end(
+        self, monkeypatch: Any, tmp_path: Path
+    ) -> None:
+        # A high advisory with no GHSA url gets an UNMAPPED id; even with an
+        # allowlist entry attempting that id, load rejects it -> the advisory
+        # still blocks.
+        audit = _audit("high", url="https://npmjs.com/advisories/1234")
+        entry = {"id": "UNMAPPED:1234", "reason": "try to hide it", "expires": "2026-10-22"}
+        allow_path = tmp_path / ".audit-allowlist.json"
+        allow_path.write_text(json.dumps([entry]))
+        with pytest.raises(SystemExit):  # rejected at load — cannot be suppressed
+            gate._load_allowlist(allow_path)
+        # and with an empty allowlist it blocks as expected
+        assert _run_gate(monkeypatch, audit, [], "2026-07-24", tmp_path) == 1
+
     def test_bad_expires_rejected(self, tmp_path: Path) -> None:
         p = tmp_path / "a.json"
         p.write_text(json.dumps([{"id": _GHSA, "reason": "x", "expires": "soon"}]))
