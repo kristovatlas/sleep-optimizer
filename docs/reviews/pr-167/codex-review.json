@@ -1,0 +1,18 @@
+{
+  "leg": "codex-review",
+  "model": "gpt-5.5 (reasoning effort xhigh)",
+  "reviewed_diff_sha256": "56c8167f31ccc1a5ad89a1d25f41b4336dc76bb28ba45e00d30487befd1bd6c7",
+  "reviewed_at": "2026-07-24",
+  "raw_output": "codex exec review --base origin/dev at final head 3369ad6. One finding: [P2] Alembic 005 breaks offline --sql generation (SQLite batch mode needs a live connection to reflect supplement_entries). Prior-round Codex P2s (dose_mg=None\u21920, label collision, timing clock mismatch) already fixed and confirmed resolved at this head.\n\n--- Review history / delta ---\nThree re-review rounds. Round 1 (Claude+Codex @ pre-fix): Codex P2s dose_mg=None\u21920.0 and label collision \u2192 FIXED. Round 2 (Claude re-run SHIP + Codex): Codex P2 supplement-timing clock mismatch (bedtime <6 vs consumption <4) \u2192 FIXED via _bedtime_clock_hour (commit 3369ad6). Round 3 (Codex @ 3369ad6): Codex review P2 = Alembic 005 breaks offline --sql generation \u2192 validated real but non-blocking (online migration path verified via live upgrade/downgrade round-trip; offline --sql not used operationally) \u2192 deferred to issue #166. Claude review+security reviewed 24e745e (SHIP, no defects, T-04 runtime-probed); the only delta since is the isolated timing-clock fix + its discriminating test + this note \u2014 full suite re-verified green (588 passed, mypy/ruff/format 0). Codex review+security ran at the final head 3369ad6.",
+  "findings": [
+    {
+      "id": "X-offline",
+      "summary": "migration 005 batch mode breaks Alembic offline --sql generation",
+      "severity_claimed": "P2",
+      "validated": true,
+      "severity_validated": "P2",
+      "disposition": "dismissed",
+      "reason": "Validated real but non-blocking: the app's operational migration path is ONLINE (make migrate/init_db) and the live upgrade\u2192downgrade\u2192upgrade round-trip passes; offline --sql is a dev/ops convenience this local-first app never uses. Deferred to issue #166 with the copy_from fix approach + an offline smoke-test to prevent regression."
+    }
+  ]
+}

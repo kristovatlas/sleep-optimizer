@@ -11,7 +11,7 @@ import pandas as pd
 from scipy import stats
 from sqlalchemy.orm import Session, joinedload
 
-from backend.models import DailyLog, HabitType, SleepRecord
+from backend.models import DailyLog, HabitType, SleepRecord, SupplementEntry
 from backend.services.dashboard_service import _normalize_bedtime_hour
 
 # --- Variable labels ---
@@ -107,6 +107,18 @@ def _time_to_hour(t: dt.time | None) -> float | None:
     if t is None:
         return None
     return t.hour + t.minute / 60
+
+
+def _bedtime_clock_hour(t: dt.time | None) -> float | None:
+    """Time on the BEDTIME clock (wrap < 6 → 24+), matching
+    _normalize_bedtime_hour. Used only for supplement timing-before-bed, which
+    is subtracted from bedtime_hour, so both sides must share the < 6 cutoff.
+    Distinct from _evening_time_to_hour (< 4, for caffeine/meal consumption).
+    """
+    h = _time_to_hour(t)
+    if h is not None and h < 6:
+        h += 24
+    return h
 
 
 def _evening_time_to_hour(t: dt.time | None) -> float | None:
@@ -210,15 +222,78 @@ def _section_has_entries(log: DailyLog, section_key: str) -> bool:
     return bool(predicate(log)) if predicate is not None else False
 
 
+# #161 Lane 2: per-supplement predictor column prefixes. Product columns are
+# dynamic (one pair per library product observed with entries in the window),
+# so they can't be pre-listed in PREDICTOR_COLUMNS/VARIABLE_LABELS — they are
+# discovered by prefix. ``supplement_dose_<pid>`` = summed per-day dose in the
+# product's unit; ``supplement_taken_hour_<pid>`` = the latest evening-clock
+# hour the product was taken (a temporary column converted to hours-before-bed
+# in prepare_analysis_dataframe, then dropped).
+_SUPP_DOSE_PREFIX = "supplement_dose_"
+_SUPP_TAKEN_HOUR_PREFIX = "supplement_taken_hour_"
+_SUPP_HBB_PREFIX = "supplement_hbb_"
+_SUPP_ABSENCE_PREFIX = "supplement:"
+
+
+def _aggregate_supplements(log: DailyLog, row: dict[str, Any]) -> None:
+    """Emit per-product dose + timing columns for product-linked entries (#161).
+
+    Only entries with a ``product_id`` are analyzed; legacy free-text rows
+    (product_id NULL) are ignored and never spawn a predictor column. For each
+    product observed on the day: dose is the SUM of that product's doses, and
+    the timing column is the LATEST evening-clock hour it was taken (closest to
+    bed) — later converted to hours-before-bedtime once the SleepRecord bedtime
+    is joined. No timed entry → timing stays NULL.
+    """
+    by_product: dict[int, list[Any]] = {}
+    for entry in log.supplement_entries:
+        if entry.product_id is None:
+            continue
+        by_product.setdefault(entry.product_id, []).append(entry)
+
+    for pid, entries in by_product.items():
+        doses = [e.dose_mg for e in entries if e.dose_mg is not None]
+        # Entries present but NO recorded dose → NULL (took it, dose unknown),
+        # NOT 0.0. Zero is reserved for an explicit `supplement:<pid>` absence
+        # ("none today", set in _apply_section_absences) — conflating the two
+        # would let a dose-less log masquerade as a skip and corrupt the dose
+        # correlation (ADR 003: unknown ≠ zero). Codex P2, Lane 2 review.
+        row[f"{_SUPP_DOSE_PREFIX}{pid}"] = float(sum(doses)) if doses else None
+        # Timing is measured against bedtime (hbb = bedtime_hour - taken_hour),
+        # so the taken-hour MUST use bedtime's clock (wrap < 6, matching
+        # _normalize_bedtime_hour) — NOT _evening_time_to_hour's < 4 consumption
+        # cutoff. Otherwise a 4:30 AM dose before a 5 AM (wrapped 29.0) bedtime
+        # would read 29.0 - 4.5 = 24.5 h instead of 0.5 (Codex P2, Lane 2 re-run).
+        taken_hours = [h for e in entries if (h := _bedtime_clock_hour(e.time)) is not None]
+        row[f"{_SUPP_TAKEN_HOUR_PREFIX}{pid}"] = max(taken_hours) if taken_hours else None
+
+
+def _supplement_has_entries(log: DailyLog, pid: int) -> bool:
+    """True if the day has a real logged entry for the given product."""
+    return any(e.product_id == pid for e in log.supplement_entries)
+
+
 def _apply_section_absences(log: DailyLog, row: dict[str, Any]) -> None:
-    """Map each explicit SectionAbsence to its zero column(s) (#159).
+    """Map each explicit SectionAbsence to its zero column(s) (#159, #161).
 
     Only applies the zero when the section has NO real entries that day (real
     entries win). Clock columns are left untouched (NULL) by construction —
-    they are absent from the column maps above.
+    they are absent from the column maps above. A ``supplement:<pid>`` key
+    (Lane 2) maps a product's dose column to explicit 0.0 (none today), leaving
+    its timing column NULL — there is no time for something not taken, mirroring
+    the caffeine last-hour rule.
     """
     for absence in log.section_absences:
         section_key = absence.section_key
+        if section_key.startswith(_SUPP_ABSENCE_PREFIX):
+            raw_pid = section_key[len(_SUPP_ABSENCE_PREFIX) :]
+            try:
+                pid = int(raw_pid)
+            except ValueError:
+                continue
+            if not _supplement_has_entries(log, pid):
+                row[f"{_SUPP_DOSE_PREFIX}{pid}"] = 0.0
+            continue
         if _section_has_entries(log, section_key):
             continue
         for col in _ABSENCE_BINARY_COLUMNS.get(section_key, ()):
@@ -374,6 +449,9 @@ def _aggregate_daily_log(log: DailyLog) -> dict[str, Any]:
     # Sexual activity
     row["sexual_activity"] = 1.0 if log.sexual_activity_entry is not None else None
 
+    # #161 Lane 2: per-product supplement dose + timing columns (dynamic).
+    _aggregate_supplements(log, row)
+
     # #159: fold in explicitly-recorded section absences (recorded 0/False),
     # after all real entries are aggregated so real data wins over an absence.
     _apply_section_absences(log, row)
@@ -441,7 +519,9 @@ def prepare_analysis_dataframe(db: Session) -> pd.DataFrame:
         .options(
             joinedload(DailyLog.caffeine_entries),
             joinedload(DailyLog.meal_entries),
-            joinedload(DailyLog.supplement_entries),
+            # #161 Lane 2: eager-load the library product with each supplement
+            # entry so per-product columns/labels don't trigger an N+1.
+            joinedload(DailyLog.supplement_entries).joinedload(SupplementEntry.product),
             joinedload(DailyLog.habit_entries),
             joinedload(DailyLog.stimulating_activity_entries),
             joinedload(DailyLog.sexual_activity_entry),
@@ -456,12 +536,39 @@ def prepare_analysis_dataframe(db: Session) -> pd.DataFrame:
         .all()
     )
 
+    # #161 Lane 2: labels + effect increments for the dynamic per-product
+    # supplement columns, keyed by the observed library products (product name
+    # is not known to the module-level VARIABLE_LABELS/_EFFECT_INCREMENTS).
+    supplement_labels: dict[str, str] = {}
+    supplement_increments: dict[str, tuple[float, str]] = {}
+
     if daily_logs:
         log_rows = []
         for log in daily_logs:
             row = _aggregate_daily_log(log)
             row["date"] = log.date
             log_rows.append(row)
+            for entry in log.supplement_entries:
+                if entry.product is None:
+                    continue
+                product = entry.product
+                pid = product.id
+                dose_col = f"{_SUPP_DOSE_PREFIX}{pid}"
+                hbb_col = f"{_SUPP_HBB_PREFIX}{pid}"
+                # Product-level distinction is the point (#161): two products
+                # sharing a name but differing by brand/form must get DISTINCT
+                # labels, or a correlation can't tell the user which one it is
+                # (Codex P2, Lane 2 review). Include brand + form when present.
+                _parts = [product.name]
+                if product.brand:
+                    _parts.append(product.brand)
+                if product.form:
+                    _parts.append(product.form)
+                _base = " · ".join(_parts)
+                supplement_labels[dose_col] = f"{_base} (dose)"
+                supplement_labels[hbb_col] = f"{_base} — timing before bed"
+                supplement_increments[dose_col] = (1.0, f"1 {product.unit}")
+                supplement_increments[hbb_col] = (1.0, "hour earlier")
 
         log_df = pd.DataFrame(log_rows)
         log_df.set_index("date", inplace=True)
@@ -482,6 +589,24 @@ def prepare_analysis_dataframe(db: Session) -> pd.DataFrame:
     else:
         df["sigma_7d"] = np.nan
         df["delta_7d"] = np.nan
+
+    # #161 Lane 2: convert each per-product "taken hour" (evening clock) into
+    # hours-before-bedtime now that bedtime_hour is joined in. Both use the
+    # same evening-clock normalization, so the subtraction is well-defined
+    # (e.g. taken 21.25 / bedtime 23.0 → 1.75h before bed). Rows without a
+    # timed entry or without a bedtime yield NaN (not recorded). The temporary
+    # taken-hour columns are dropped so only the hbb predictor is exposed.
+    # bedtime_hour is always a column here (added for every sleep row above,
+    # and we only reach this point when sleep records exist).
+    taken_cols = [c for c in df.columns if c.startswith(_SUPP_TAKEN_HOUR_PREFIX)]
+    for tcol in taken_cols:
+        pid_str = tcol[len(_SUPP_TAKEN_HOUR_PREFIX) :]
+        df[f"{_SUPP_HBB_PREFIX}{pid_str}"] = df["bedtime_hour"] - df[tcol]
+    if taken_cols:
+        df = df.drop(columns=taken_cols)
+
+    df.attrs["supplement_labels"] = supplement_labels
+    df.attrs["supplement_increments"] = supplement_increments
 
     return df
 
@@ -614,11 +739,21 @@ def _cutoff_label(pred: str, cutoff: float) -> str:
 
 
 def _effect_size(
-    pred: str, outcome: str, subset: pd.DataFrame, pearson_r: float
+    pred: str,
+    outcome: str,
+    subset: pd.DataFrame,
+    pearson_r: float,
+    extra_increments: dict[str, tuple[float, str]] | None = None,
 ) -> dict[str, Any] | None:
     """Slope in natural units per predictor increment, or None (binary /
-    unmapped predictors have no meaningful per-unit slope)."""
+    unmapped predictors have no meaningful per-unit slope).
+
+    ``extra_increments`` supplies increments for dynamic columns not known at
+    module level (#161: per-product supplement dose/timing); a column with no
+    mapping in either source degrades gracefully to None."""
     inc = _EFFECT_INCREMENTS.get(pred)
+    if inc is None and extra_increments is not None:
+        inc = extra_increments.get(pred)
     if inc is None:
         return None
     increment, increment_label = inc
@@ -680,6 +815,12 @@ def compute_correlations(
     if df.empty:
         return [], 0
 
+    # #161 Lane 2: dynamic per-product supplement label/increment maps attached
+    # by prepare_analysis_dataframe. Read before any df reassignment so a slice
+    # that might not carry .attrs can't drop them.
+    supplement_labels: dict[str, str] = df.attrs.get("supplement_labels", {})
+    supplement_increments: dict[str, tuple[float, str]] = df.attrs.get("supplement_increments", {})
+
     # Filter sick days
     sick_count = 0
     if "is_sick" in df.columns:
@@ -689,7 +830,12 @@ def compute_correlations(
 
     results: list[dict[str, Any]] = []
 
-    predictors = [c for c in PREDICTOR_COLUMNS if c in df.columns]
+    # Static predictors + dynamically-discovered per-product supplement columns
+    # (#161). The min_days + variance + NaN gates below apply unchanged, so a
+    # rarely-logged product (<14 days) or a zero-variance product is skipped.
+    predictors = [c for c in PREDICTOR_COLUMNS if c in df.columns] + [
+        c for c in df.columns if c.startswith("supplement_")
+    ]
     outcomes = [c for c in OUTCOME_COLUMNS if c in df.columns]
 
     for pred in predictors:
@@ -713,7 +859,8 @@ def compute_correlations(
             results.append(
                 {
                     "predictor": pred,
-                    "predictor_label": VARIABLE_LABELS.get(pred, pred),
+                    "predictor_label": supplement_labels.get(pred)
+                    or VARIABLE_LABELS.get(pred, pred),
                     "outcome": outcome,
                     "outcome_label": VARIABLE_LABELS.get(outcome, outcome),
                     "pearson_r": round(float(pearson_r), 4),
@@ -721,7 +868,9 @@ def compute_correlations(
                     "p_value": round(float(p_val), 6),
                     "n_days": n,
                     "confidence": _confidence_level(n),
-                    "effect": _effect_size(pred, outcome, subset, float(pearson_r)),
+                    "effect": _effect_size(
+                        pred, outcome, subset, float(pearson_r), supplement_increments
+                    ),
                     "contrast": _binned_contrast(pred, outcome, subset),
                 }
             )

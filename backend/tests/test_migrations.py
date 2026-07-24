@@ -322,3 +322,53 @@ def test_migration_004_adds_section_absences(tmp_path: Path) -> None:
     assert {"id", "date", "section_key"} <= cols
     assert "uq_section_absence" in uniques
     assert "section_absences" in ALL_MODEL_TABLES  # model registers the table
+
+
+def test_migration_005_adds_supplement_products_and_fk(tmp_path: Path) -> None:
+    """#161 Lane 2: the 005 migration creates the supplement_products library
+    table and adds supplement_entries.product_id (nullable FK), and the chain
+    still reaches head cleanly. Additive: legacy dose_mg/name columns survive."""
+    db_path = tmp_path / "m005.db"
+    command.upgrade(_cfg(db_path), "head")
+    eng = database.create_db_engine(str(db_path))
+    try:
+        insp = inspect(eng)
+        tables = set(insp.get_table_names())
+        product_cols = {c["name"] for c in insp.get_columns("supplement_products")}
+        entry_cols = {c["name"] for c in insp.get_columns("supplement_entries")}
+        fks = insp.get_foreign_keys("supplement_entries")
+    finally:
+        eng.dispose()
+    assert "supplement_products" in tables
+    assert {"id", "name", "brand", "form", "default_dose", "unit", "step", "is_sticky"} <= (
+        product_cols
+    )
+    # Legacy columns preserved; product_id added.
+    assert {"name", "dose_mg", "product_id"} <= entry_cols
+    assert "supplement_products" in ALL_MODEL_TABLES  # model registers the table
+    # The new nullable FK points product_id → supplement_products.id.
+    assert any(
+        fk["referred_table"] == "supplement_products"
+        and fk["constrained_columns"] == ["product_id"]
+        for fk in fks
+    )
+
+
+def test_migration_005_downgrade_round_trip(tmp_path: Path) -> None:
+    """upgrade head → downgrade 004 → upgrade head must be clean (proves the
+    batch-mode add/drop of product_id + the products table both reverse)."""
+    db_path = tmp_path / "m005rt.db"
+    cfg = _cfg(db_path)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "004")
+
+    eng = database.create_db_engine(str(db_path))
+    try:
+        insp = inspect(eng)
+        assert "supplement_products" not in set(insp.get_table_names())
+        assert "product_id" not in {c["name"] for c in insp.get_columns("supplement_entries")}
+    finally:
+        eng.dispose()
+
+    command.upgrade(cfg, "head")  # forward again, cleanly
+    assert _stamped_revision(db_path) == HEAD

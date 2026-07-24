@@ -20,6 +20,8 @@ from backend.models import (
     StimulatingActivityEntry,
     StimulatingActivityType,
     SunlightEntry,
+    SupplementEntry,
+    SupplementProduct,
 )
 from backend.services.stats_engine import (
     OUTCOME_COLUMNS,
@@ -940,3 +942,299 @@ class TestSectionAbsenceAggregation:
         assert set(df2["sauna"].dropna().unique()) == {1.0}
         results2, _ = compute_correlations(df2, min_days=14)
         assert not any(r["predictor"] == "sauna" for r in results2)
+
+
+# --- #161 Lane 2: per-product supplement predictors (dose + timing) ---
+
+
+def _make_product(db: Session, name: str, **kwargs: Any) -> SupplementProduct:
+    product = SupplementProduct(name=name, **kwargs)
+    db.add(product)
+    db.flush()  # assign product.id
+    return product
+
+
+class TestSupplementPredictors:
+    def test_dose_predictor_appears_and_absence_unlocks(self, db: Session) -> None:
+        """A product-linked supplement becomes a dose predictor: ~8 days
+        melatonin@3mg (high scores) + ~8 days marked none-today via a
+        supplement:<pid> absence (0mg, low scores) → the dose column carries
+        {0.0, 3.0} and correlates, labeled "Melatonin (dose)". Mutation: drop
+        the absence rows → column is all-3.0 (zero variance) and the predictor
+        disappears — proving the absence-key wiring is what unlocks it."""
+        melatonin = _make_product(db, "Melatonin", unit="mg", default_dose=3.0)
+        pid = melatonin.id
+        dose_col = f"supplement_dose_{pid}"
+        base = dt.date(2025, 5, 1)
+        # 8 "took 3mg" days, higher sleep scores.
+        for i in range(8):
+            d = base + dt.timedelta(days=i)
+            _make_sleep_record(db, d, sleep_score=88 + i)
+            _make_daily_log(db, d)
+            db.add(SupplementEntry(date=d, name="Melatonin", dose_mg=3.0, product_id=pid))
+        # 8 "none today" days (absence), lower sleep scores.
+        for i in range(8):
+            d = base + dt.timedelta(days=8 + i)
+            _make_sleep_record(db, d, sleep_score=60 + i)
+            _make_daily_log(db, d)
+            db.add(SectionAbsence(date=d, section_key=f"supplement:{pid}"))
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert set(df[dose_col].dropna().unique()) == {0.0, 3.0}
+
+        results, _ = compute_correlations(df, min_days=14)
+        dose_rows = [r for r in results if r["predictor"] == dose_col]
+        assert dose_rows, "melatonin dose correlation should be produced"
+        assert dose_rows[0]["predictor_label"] == "Melatonin (dose)"
+        assert dose_rows[0]["n_days"] == 16
+
+        # Mutation: drop the absence rows → off-days revert to NULL (not
+        # recorded), the column is all-3.0, std==0, predictor disappears.
+        for absence in db.query(SectionAbsence).all():
+            db.delete(absence)
+        db.commit()
+
+        df2 = prepare_analysis_dataframe(db)
+        assert set(df2[dose_col].dropna().unique()) == {3.0}
+        results2, _ = compute_correlations(df2, min_days=14)
+        assert not any(r["predictor"] == dose_col for r in results2)
+
+    def test_two_products_stay_distinct(self, db: Session) -> None:
+        """Two library products produce separate columns/predictors — never
+        merged into one 'magnesium' bucket."""
+        glycinate = _make_product(db, "Magnesium Glycinate", form="capsule")
+        threonate = _make_product(db, "Magnesium L-Threonate", form="capsule")
+        col_a = f"supplement_dose_{glycinate.id}"
+        col_b = f"supplement_dose_{threonate.id}"
+        base = dt.date(2025, 6, 1)
+        for i in range(16):
+            d = base + dt.timedelta(days=i)
+            _make_sleep_record(db, d, sleep_score=70 + (i % 5))
+            _make_daily_log(db, d)
+            # Distinct doses so each column has its own variance.
+            db.add(
+                SupplementEntry(
+                    date=d, name="Magnesium Glycinate", dose_mg=200.0 + i, product_id=glycinate.id
+                )
+            )
+            db.add(
+                SupplementEntry(
+                    date=d,
+                    name="Magnesium L-Threonate",
+                    dose_mg=2000.0 - i * 10,
+                    product_id=threonate.id,
+                )
+            )
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert col_a in df.columns
+        assert col_b in df.columns
+        # Distinct values, never merged.
+        assert df[col_a].iloc[0] == 200.0
+        assert df[col_b].iloc[0] == 2000.0
+
+        results, _ = compute_correlations(df, min_days=14)
+        labels = {r["predictor"]: r["predictor_label"] for r in results}
+        # Labels include form (· capsule) — brand/form are appended for
+        # product-level distinctness (Codex P2, Lane 2 review).
+        assert labels.get(col_a) == "Magnesium Glycinate · capsule (dose)"
+        assert labels.get(col_b) == "Magnesium L-Threonate · capsule (dose)"
+
+    def test_same_name_products_get_distinct_labels(self, db: Session) -> None:
+        """Two products sharing a name but differing by brand get DISTINCT
+        labels (Codex P2) — otherwise a correlation can't say which one."""
+        a = _make_product(db, "Melatonin", brand="Nature Made", unit="mg")
+        b = _make_product(db, "Melatonin", brand="Life Extension", unit="mg")
+        col_a = f"supplement_dose_{a.id}"
+        col_b = f"supplement_dose_{b.id}"
+        base = dt.date(2025, 6, 1)
+        for i in range(16):
+            d = base + dt.timedelta(days=i)
+            _make_sleep_record(db, d, sleep_score=70 + (i % 5))
+            _make_daily_log(db, d)
+            db.add(SupplementEntry(date=d, name="Melatonin", dose_mg=3.0 + i, product_id=a.id))
+            db.add(SupplementEntry(date=d, name="Melatonin", dose_mg=1.0 + i, product_id=b.id))
+        db.commit()
+
+        results, _ = compute_correlations(prepare_analysis_dataframe(db), min_days=14)
+        labels = {r["predictor"]: r["predictor_label"] for r in results}
+        assert labels.get(col_a) == "Melatonin · Nature Made (dose)"
+        assert labels.get(col_b) == "Melatonin · Life Extension (dose)"
+        assert labels[col_a] != labels[col_b]
+
+    def test_dose_unrecorded_is_null_not_zero(self, db: Session) -> None:
+        """A product logged with NO dose (dose_mg=None) → NULL, never 0.0.
+        Zero is reserved for an explicit none-today absence, so an unrecorded
+        dose must NOT masquerade as a skip (Codex P2 / ADR 003)."""
+        from backend.models import SectionAbsence
+
+        mel = _make_product(db, "Melatonin", unit="mg")
+        dose_col = f"supplement_dose_{mel.id}"
+
+        # Day 1: took it, dose unknown (dose_mg=None) → column NULL.
+        d1 = dt.date(2025, 6, 1)
+        _make_sleep_record(db, d1)
+        _make_daily_log(db, d1)
+        db.add(SupplementEntry(date=d1, name="Melatonin", dose_mg=None, product_id=mel.id))
+        # Day 2: explicit none-today via absence key → column 0.0.
+        d2 = dt.date(2025, 6, 2)
+        _make_sleep_record(db, d2)
+        _make_daily_log(db, d2)
+        db.add(SectionAbsence(date=d2, section_key=f"supplement:{mel.id}"))
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert pd.isna(df.loc[d1][dose_col])  # unknown dose → NULL, excluded
+        assert df.loc[d2][dose_col] == 0.0  # explicit skip → 0, the two differ
+
+    def test_timing_predictor_hours_before_bed(self, db: Session) -> None:
+        """supplement_hbb_<pid> = bedtime_hour - evening_hour(taken). Melatonin
+        at 9:15 PM with an 11 PM bedtime → 1.75 h before bed. A none-today
+        (0-dose) day → timing NULL (no time for something not taken), not 0."""
+        melatonin = _make_product(db, "Melatonin", unit="mg")
+        pid = melatonin.id
+        hbb_col = f"supplement_hbb_{pid}"
+        dose_col = f"supplement_dose_{pid}"
+
+        taken_day = dt.date(2025, 7, 1)
+        _make_sleep_record(
+            db,
+            taken_day,
+            bedtime=dt.datetime.combine(taken_day - dt.timedelta(days=1), dt.time(23, 0)),
+        )
+        _make_daily_log(db, taken_day)
+        db.add(
+            SupplementEntry(
+                date=taken_day,
+                name="Melatonin",
+                dose_mg=3.0,
+                time=dt.time(21, 15),
+                product_id=pid,
+            )
+        )
+
+        # A none-today day: dose 0.0 via absence, but no timing.
+        absent_day = dt.date(2025, 7, 2)
+        _make_sleep_record(db, absent_day)
+        _make_daily_log(db, absent_day)
+        db.add(SectionAbsence(date=absent_day, section_key=f"supplement:{pid}"))
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert df.loc[taken_day][hbb_col] == pytest.approx(1.75)
+        # Absent day: explicit 0 dose, NULL timing.
+        assert df.loc[absent_day][dose_col] == 0.0
+        assert pd.isna(df.loc[absent_day][hbb_col])
+
+    def test_timing_predictor_evening_clock_after_midnight(self, db: Session) -> None:
+        """Both taken-time and bedtime use the evening clock, so a post-midnight
+        dose stays consistent: 12:30 AM (24.5) with a 1 AM bedtime (25.0) →
+        0.5 h before bed, not a negative wrap."""
+        melatonin = _make_product(db, "Melatonin")
+        pid = melatonin.id
+        hbb_col = f"supplement_hbb_{pid}"
+        d = dt.date(2025, 8, 1)
+        _make_sleep_record(db, d, bedtime=dt.datetime.combine(d, dt.time(1, 0)))
+        _make_daily_log(db, d)
+        db.add(
+            SupplementEntry(
+                date=d, name="Melatonin", dose_mg=3.0, time=dt.time(0, 30), product_id=pid
+            )
+        )
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert df.loc[d][hbb_col] == pytest.approx(0.5)
+
+    def test_timing_predictor_late_sleeper_4_to_6am(self, db: Session) -> None:
+        """Late-sleeper clock alignment (Codex P2, Lane 2 re-run): bedtime wraps
+        at < 6 but supplement consumption times use a < 4 cutoff, so a 4:30 AM
+        dose (in the 4–6 AM no-wrap gap) before a 5 AM bedtime must still use
+        the BEDTIME clock for timing: hbb = 29.0 - 28.5 = 0.5, NOT 24.5."""
+        melatonin = _make_product(db, "Melatonin")
+        pid = melatonin.id
+        hbb_col = f"supplement_hbb_{pid}"
+        d = dt.date(2025, 9, 1)
+        _make_sleep_record(db, d, bedtime=dt.datetime.combine(d, dt.time(5, 0)))
+        _make_daily_log(db, d)
+        db.add(
+            SupplementEntry(
+                date=d, name="Melatonin", dose_mg=3.0, time=dt.time(4, 30), product_id=pid
+            )
+        )
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert df.loc[d][hbb_col] == pytest.approx(0.5)
+
+    def test_decimal_dose_round_trips_with_unit_on_product(self, db: Session) -> None:
+        """Decimal doses (0.5 mg melatonin) survive aggregation; the unit lives
+        on the product, the value on the entry's dose_mg."""
+        melatonin = _make_product(db, "Melatonin", unit="mcg", step=0.5, default_dose=0.5)
+        pid = melatonin.id
+        dose_col = f"supplement_dose_{pid}"
+        d = dt.date(2025, 9, 1)
+        _make_sleep_record(db, d)
+        _make_daily_log(db, d)
+        db.add(SupplementEntry(date=d, name="Melatonin", dose_mg=0.5, product_id=pid))
+        db.commit()
+
+        assert melatonin.unit == "mcg"
+        df = prepare_analysis_dataframe(db)
+        assert df.loc[d][dose_col] == pytest.approx(0.5)
+
+    def test_summed_dose_and_latest_timing_for_multiple_same_day_entries(self, db: Session) -> None:
+        """Multiple entries of the same product on one day: dose SUMS, timing
+        uses the LATEST (closest to bed)."""
+        product = _make_product(db, "Magnesium")
+        pid = product.id
+        dose_col = f"supplement_dose_{pid}"
+        hbb_col = f"supplement_hbb_{pid}"
+        d = dt.date(2025, 10, 1)
+        _make_sleep_record(
+            db, d, bedtime=dt.datetime.combine(d - dt.timedelta(days=1), dt.time(23, 0))
+        )
+        _make_daily_log(db, d)
+        db.add(
+            SupplementEntry(
+                date=d, name="Magnesium", dose_mg=100.0, time=dt.time(8, 0), product_id=pid
+            )
+        )
+        db.add(
+            SupplementEntry(
+                date=d, name="Magnesium", dose_mg=50.0, time=dt.time(21, 0), product_id=pid
+            )
+        )
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert df.loc[d][dose_col] == pytest.approx(150.0)  # summed
+        # Latest entry 21:00 → 2h before an 11 PM bedtime.
+        assert df.loc[d][hbb_col] == pytest.approx(2.0)
+
+    def test_malformed_supplement_absence_key_is_ignored(self, db: Session) -> None:
+        """A non-numeric supplement:<pid> key can't map to a product column —
+        it is skipped without crashing (defensive; the write path only ever
+        emits integer pids)."""
+        d = dt.date(2025, 12, 1)
+        _make_sleep_record(db, d)
+        _make_daily_log(db, d)
+        db.add(SectionAbsence(date=d, section_key="supplement:not-a-number"))
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)  # must not raise
+        assert not any(c.startswith("supplement_") for c in df.columns)
+
+    def test_free_text_entry_is_not_a_predictor(self, db: Session) -> None:
+        """A legacy free-text SupplementEntry (product_id NULL) spawns no
+        supplement_* column and does not crash aggregation."""
+        d = dt.date(2025, 11, 1)
+        _make_sleep_record(db, d)
+        _make_daily_log(db, d)
+        db.add(SupplementEntry(date=d, name="Random Herb", dose_mg=500.0, product_id=None))
+        db.commit()
+
+        df = prepare_analysis_dataframe(db)
+        assert not any(c.startswith("supplement_") for c in df.columns)

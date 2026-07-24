@@ -182,7 +182,10 @@ def _get_top_factors(
 
     def _factor(r: dict[str, Any]) -> dict[str, Any]:
         return {
-            "label": VARIABLE_LABELS.get(r["predictor"], r["predictor"]),
+            # Prefer the label compute_correlations already resolved (covers
+            # #161 dynamic per-product supplement labels), fall back to static.
+            "label": r.get("predictor_label")
+            or VARIABLE_LABELS.get(r["predictor"], r["predictor"]),
             "pearson_r": r["pearson_r"],
             "n_days": r["n_days"],
             # #17: natural-units slope, shown as the headline beside r

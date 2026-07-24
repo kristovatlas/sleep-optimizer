@@ -223,6 +223,42 @@ class MealEntry(Base):
     daily_log: Mapped[DailyLog] = relationship(back_populates="meal_entries")
 
 
+class SupplementProduct(Base):
+    """A distinct supplement product in the user's library (#161, Lane 2).
+
+    Product-level granularity, owner-decided 2026-07-23: brand + form + dose
+    make a product distinct (Nature Made Melatonin 3 mg ≠ a 300 mcg sublingual;
+    Pure Encapsulations Magnesium Glycinate ≠ Magnesium L-Threonate / Magtein),
+    and each product is its own analysis predictor — no form-level rollups. The
+    library entry is the product (name + brand + form + a *default* dose used
+    only to prefill); the actual per-day dose lives on ``SupplementEntry``.
+
+    Purely additive: existing free-text ``SupplementEntry`` rows keep
+    ``product_id`` NULL and their ``name``/``dose_mg``, and are never turned
+    into predictors (Lane 2 only analyzes product-linked entries).
+    """
+
+    __tablename__ = "supplement_products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    form: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Prefill only — the analyzed dose is the per-day value on SupplementEntry.
+    default_dose: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Dose unit for this product: "mg" (default), "mcg", "IU", "g". The numeric
+    # dose VALUE is stored on SupplementEntry.dose_mg, whose legacy name is kept
+    # to avoid touching existing data — the value is in THIS product's unit, not
+    # necessarily milligrams. See ADR 003 / the v0.1.2 supplement plan.
+    unit: Mapped[str] = mapped_column(String(10), nullable=False, default="mg")
+    # Stepper increment for the dose input (e.g. 0.5 mg melatonin).
+    step: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    # Sticky products auto-appear in each day's log, prefilled at default_dose.
+    is_sticky: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    entries: Mapped[list["SupplementEntry"]] = relationship(back_populates="product")
+
+
 class SupplementEntry(Base):
     __tablename__ = "supplement_entries"
 
@@ -230,9 +266,17 @@ class SupplementEntry(Base):
     date: Mapped[dt.date] = mapped_column(Date, ForeignKey("daily_logs.date"), nullable=False)
     time: Mapped[dt.time | None] = mapped_column(Time, nullable=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Numeric dose value in the product's unit (legacy column name — NOT always
+    # milligrams; the unit lives on SupplementProduct.unit). See #161.
     dose_mg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # #161 Lane 2: link to a library product. NULL for legacy free-text rows,
+    # which stay un-analyzed. Additive — no data migration.
+    product_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("supplement_products.id"), nullable=True
+    )
 
     daily_log: Mapped[DailyLog] = relationship(back_populates="supplement_entries")
+    product: Mapped["SupplementProduct | None"] = relationship(back_populates="entries")
 
 
 class HabitEntry(Base):
