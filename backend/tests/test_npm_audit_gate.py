@@ -58,6 +58,51 @@ class TestAdvisoryExtraction:
         assert gate._advisories({}) == {}
         assert gate._advisories({"vulnerabilities": {}}) == {}
 
+    def test_unmappable_high_advisory_blocks(self) -> None:
+        # A high/critical advisory with no GHSA url must NOT be silently dropped
+        # (fail closed): it gets a synthetic UNMAPPED id so it can't be
+        # allowlisted and it blocks.
+        adv = gate._advisories(_audit("high", url="https://npmjs.com/advisories/1234"))
+        assert len(adv) == 1
+        (gid,) = adv
+        assert gid.startswith("UNMAPPED:")
+
+
+class TestAuditInfraFailsClosed:
+    """A failed/errored `npm audit` (registry or network outage) must fail
+    CLOSED, not be read as 'no vulnerabilities found'."""
+
+    def _fake_proc(self, stdout: str, returncode: int = 1, stderr: str = "") -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+
+    def test_error_json_raises(self, monkeypatch: Any, tmp_path: Path) -> None:
+        payload = json.dumps({"error": {"code": "ENETUNREACH", "summary": "network down"}})
+        monkeypatch.setattr(gate.subprocess, "run", lambda *a, **k: self._fake_proc(payload))
+        with pytest.raises(SystemExit):
+            gate._run_npm_audit(tmp_path)
+
+    def test_missing_vulnerabilities_key_raises(self, monkeypatch: Any, tmp_path: Path) -> None:
+        monkeypatch.setattr(
+            gate.subprocess, "run", lambda *a, **k: self._fake_proc(json.dumps({"metadata": {}}))
+        )
+        with pytest.raises(SystemExit):
+            gate._run_npm_audit(tmp_path)
+
+    def test_empty_stdout_raises(self, monkeypatch: Any, tmp_path: Path) -> None:
+        monkeypatch.setattr(gate.subprocess, "run", lambda *a, **k: self._fake_proc(""))
+        with pytest.raises(SystemExit):
+            gate._run_npm_audit(tmp_path)
+
+    def test_clean_audit_with_empty_vulns_passes_through(
+        self, monkeypatch: Any, tmp_path: Path
+    ) -> None:
+        # exit 0, has vulnerabilities key (empty) → valid, returns data
+        proc = self._fake_proc(json.dumps({"vulnerabilities": {}, "metadata": {}}), returncode=0)
+        monkeypatch.setattr(gate.subprocess, "run", lambda *a, **k: proc)
+        assert gate._run_npm_audit(tmp_path) == {"vulnerabilities": {}, "metadata": {}}
+
 
 class TestAllowlistLoading:
     def test_missing_file_is_empty(self, tmp_path: Path) -> None:

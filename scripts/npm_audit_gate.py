@@ -41,11 +41,26 @@ def _run_npm_audit(dir_: Path) -> dict[str, Any]:
         text=True,
     )
     if not proc.stdout.strip():
-        raise SystemExit(f"npm audit produced no JSON output (stderr: {proc.stderr.strip()})")
+        raise SystemExit(
+            f"npm audit produced no JSON output (exit {proc.returncode}; "
+            f"stderr: {proc.stderr.strip()})"
+        )
     try:
         data: dict[str, Any] = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"could not parse npm audit JSON: {exc}") from exc
+    # Fail CLOSED if the audit itself did not complete (registry/network error):
+    # a successful audit always has a "vulnerabilities" key (possibly empty); an
+    # errored one emits {"error": {...}} with a non-zero exit and no
+    # vulnerabilities. Treating that as "no vulns found" would silently pass a
+    # PR during an advisory-DB outage (a normal audit-with-vulns also exits
+    # non-zero, but it HAS "vulnerabilities" — so we key on the data, not the
+    # exit code).
+    if "error" in data or "vulnerabilities" not in data:
+        raise SystemExit(
+            f"npm audit did not complete (exit {proc.returncode}): "
+            f"{data.get('error', 'no vulnerabilities key in output')}"
+        )
     return data
 
 
@@ -59,13 +74,23 @@ def _advisories(audit: dict[str, Any]) -> dict[str, dict[str, Any]]:
             sev = str(via.get("severity", "")).lower()
             if sev not in _BLOCKING:
                 continue
+            # Fail CLOSED on an advisory we cannot map to a GHSA id: it can't be
+            # allowlisted (entries are keyed by GHSA), so give it a synthetic
+            # UNMAPPED id and let it block + be reported, rather than dropping it.
             match = _GHSA.search(str(via.get("url", "")))
-            if not match:
-                continue
-            gid = match.group(0)
+            gid = (
+                match.group(0)
+                if match
+                else f"UNMAPPED:{via.get('source') or via.get('url') or pkg}"
+            )
             found.setdefault(
                 gid,
-                {"id": gid, "severity": sev, "package": via.get("name", pkg), "url": via["url"]},
+                {
+                    "id": gid,
+                    "severity": sev,
+                    "package": via.get("name", pkg),
+                    "url": via.get("url") or "(no advisory url)",
+                },
             )
     return found
 
