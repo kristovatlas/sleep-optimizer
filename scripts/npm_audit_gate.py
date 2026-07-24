@@ -141,11 +141,15 @@ def main() -> int:
     today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()
 
     advisories = _advisories(_run_npm_audit(dir_))
-    allow = {e["id"]: e for e in _load_allowlist(allow_path)}
+    # GHSA ids are matched case-INSENSITIVELY: validation uses IGNORECASE, and
+    # npm's URL casing can differ from an allowlist entry's, so normalize both
+    # sides to upper for the lookup (Codex P2) -- otherwise a valid lowercase
+    # entry would silently miss and the advisory would block.
+    allow = {e["id"].upper(): e for e in _load_allowlist(allow_path)}
 
     blocking: list[str] = []
     for gid, adv in sorted(advisories.items()):
-        entry = allow.get(gid)
+        entry = allow.get(gid.upper())
         head = f"{gid} [{adv['severity']}] {adv['package']}"
         if entry is None:
             blocking.append(f"  x {head} -- {adv['url']}")
@@ -156,9 +160,10 @@ def main() -> int:
             print(f"  suppressed {head} until {entry['expires']}: {entry['reason']}")
 
     # Stale allowlist entries (advisory no longer present) -- warn, don't block.
-    for gid in allow:
-        if gid not in advisories:
-            print(f"  stale allowlist entry {gid}: advisory no longer reported -- safe to remove")
+    seen = {gid.upper() for gid in advisories}
+    for norm_id, entry in allow.items():
+        if norm_id not in seen:
+            print(f"  stale allowlist entry {entry['id']}: advisory no longer reported -- remove")
 
     if blocking:
         print(

@@ -63,7 +63,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # fetch-depth 0 so the audit gate can run the BASE branch's copy of the
+      # gate script (trusted-base pattern; see the audit step below).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -87,8 +91,23 @@ jobs:
       # with no forward patch can be suppressed with a written reason + expiry
       # instead of wedging every PR or forcing a risky downgrade. Expired
       # entries block again (forced re-review). Stdlib only — no new dep.
+      # Runs the BASE branch's copy of the gate script against the PR's
+      # lockfile+allowlist as data (same trusted-base pattern as review-gate,
+      # PR #168 Codex security): a dependency PR can't neuter its own audit by
+      # editing the script — it would have to visibly edit this workflow.
+      # Bootstrap: before the gate exists on base (or on push, no base_ref),
+      # fall back to the local copy, which is then trusted branch code.
       - name: Dependency audit (npm, lockfile, production deps)
-        run: python3 scripts/npm_audit_gate.py --dir frontend
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          if [ -n "${{ github.base_ref }}" ] && git cat-file -e "$BASE:scripts/npm_audit_gate.py" 2>/dev/null; then
+            git show "$BASE:scripts/npm_audit_gate.py" > /tmp/trusted_npm_audit_gate.py
+            echo "using trusted audit gate from $BASE"
+          else
+            cp scripts/npm_audit_gate.py /tmp/trusted_npm_audit_gate.py
+            echo "::warning::bootstrap: audit gate not on base branch (or push event); using local copy"
+          fi
+          python3 /tmp/trusted_npm_audit_gate.py --dir frontend
 
       - name: Install dependencies
         working-directory: frontend
@@ -126,7 +145,10 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth 0 for the trusted-base audit-gate copy (see audit step).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -157,9 +179,19 @@ jobs:
 
       # Same audit-before-install gate as the frontend job (T-13, §8):
       # jobs run in parallel, so each one that executes dependency
-      # lifecycle scripts must carry its own gate (allowlist honored too).
+      # lifecycle scripts must carry its own gate. Trusted-base copy (same as
+      # frontend job) so a PR can't neuter the script.
       - name: Dependency audit (npm, lockfile, production deps)
-        run: python3 scripts/npm_audit_gate.py --dir frontend
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          if [ -n "${{ github.base_ref }}" ] && git cat-file -e "$BASE:scripts/npm_audit_gate.py" 2>/dev/null; then
+            git show "$BASE:scripts/npm_audit_gate.py" > /tmp/trusted_npm_audit_gate.py
+            echo "using trusted audit gate from $BASE"
+          else
+            cp scripts/npm_audit_gate.py /tmp/trusted_npm_audit_gate.py
+            echo "::warning::bootstrap: audit gate not on base branch (or push event); using local copy"
+          fi
+          python3 /tmp/trusted_npm_audit_gate.py --dir frontend
 
       - name: Install frontend
         working-directory: frontend

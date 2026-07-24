@@ -225,3 +225,9 @@ class TestGateDecision:
     def test_expiry_boundary_last_valid_day_passes(self, monkeypatch: Any, tmp_path: Path) -> None:
         # today == expires is still valid (expires is inclusive)
         assert _run_gate(monkeypatch, _audit("high"), [self._entry], "2026-10-22", tmp_path) == 0
+
+    def test_allowlist_id_case_insensitive_match(self, monkeypatch: Any, tmp_path: Path) -> None:
+        # A lowercase allowlist id must still suppress the canonically-cased
+        # advisory (Codex P2) — matching is case-insensitive on both sides.
+        entry = {"id": _GHSA.lower(), "reason": "x", "expires": "2026-10-22"}
+        assert _run_gate(monkeypatch, _audit("high"), [entry], "2026-07-24", tmp_path) == 0
