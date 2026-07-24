@@ -80,15 +80,15 @@ jobs:
 
       # T-13 (docs/THREAT_MODEL.md): fail on a known-vulnerable runtime
       # dependency BEFORE `npm ci` executes dependency lifecycle scripts
-      # (CLAUDE.md's audit-before-install rule). --package-lock-only evaluates
-      # the committed lockfile with no node_modules present. Scoped to
-      # production deps (--omit=dev) — those are what ship to the user's
-      # browser; build-tool dev deps are covered by the install cooldown +
-      # Socket. Gated at high+critical so an unfixable low/moderate advisory
-      # can't wedge every PR.
+      # (CLAUDE.md's audit-before-install rule). The gate wraps the same
+      # lockfile-only, production-only (--omit=dev) audit at high+critical, and
+      # adds a documented, EXPIRING per-advisory allowlist
+      # (frontend/.audit-allowlist.json) so a genuinely non-applicable advisory
+      # with no forward patch can be suppressed with a written reason + expiry
+      # instead of wedging every PR or forcing a risky downgrade. Expired
+      # entries block again (forced re-review). Stdlib only — no new dep.
       - name: Dependency audit (npm, lockfile, production deps)
-        working-directory: frontend
-        run: npm audit --package-lock-only --omit=dev --audit-level=high
+        run: python3 scripts/npm_audit_gate.py --dir frontend
 
       - name: Install dependencies
         working-directory: frontend
@@ -157,10 +157,9 @@ jobs:
 
       # Same audit-before-install gate as the frontend job (T-13, §8):
       # jobs run in parallel, so each one that executes dependency
-      # lifecycle scripts must carry its own gate.
+      # lifecycle scripts must carry its own gate (allowlist honored too).
       - name: Dependency audit (npm, lockfile, production deps)
-        working-directory: frontend
-        run: npm audit --package-lock-only --omit=dev --audit-level=high
+        run: python3 scripts/npm_audit_gate.py --dir frontend
 
       - name: Install frontend
         working-directory: frontend

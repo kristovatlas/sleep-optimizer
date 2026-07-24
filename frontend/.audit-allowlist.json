@@ -1,0 +1,9 @@
+[
+  {
+    "id": "GHSA-qwww-vcr4-c8h2",
+    "package": "react-router / react-router-dom",
+    "severity": "high",
+    "reason": "RSC Mode (React Server Components / framework mode) CSRF bypass — action execution before a 400 response. Somnus is a purely client-side SPA (src/router.tsx uses createBrowserRouter + RouterProvider; no server, no RSC/framework mode, no server actions), so the vulnerable code path is never exercised. No forward-patched react-router-dom exists (latest published is 7.18.1, inside the 7.12.0-8.2.0 advisory range); the only npm remediation is a breaking downgrade to 7.11.0, which would sacrifice fixes/features on core routing to chase a non-applicable advisory. Suppressed with expiry; revisit to adopt a real forward patch when react-router publishes one.",
+    "expires": "2026-10-22"
+  }
+]
