@@ -130,6 +130,26 @@ class TestAllowlistLoading:
         with pytest.raises(SystemExit):
             gate._load_allowlist(p)
 
+    @pytest.mark.parametrize("reason", ["", "   ", None])
+    def test_blank_reason_rejected(self, tmp_path: Path, reason: Any) -> None:
+        # A blank/absent-text justification must NOT be accepted (Codex P2).
+        p = tmp_path / "a.json"
+        p.write_text(json.dumps([{"id": _GHSA, "reason": reason, "expires": "2026-10-22"}]))
+        with pytest.raises(SystemExit):
+            gate._load_allowlist(p)
+
+    def test_blank_id_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.json"
+        p.write_text(json.dumps([{"id": "  ", "reason": "x", "expires": "2026-10-22"}]))
+        with pytest.raises(SystemExit):
+            gate._load_allowlist(p)
+
+    def test_bad_expires_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.json"
+        p.write_text(json.dumps([{"id": _GHSA, "reason": "x", "expires": "soon"}]))
+        with pytest.raises(SystemExit):
+            gate._load_allowlist(p)
+
 
 def _run_gate(
     monkeypatch: Any,

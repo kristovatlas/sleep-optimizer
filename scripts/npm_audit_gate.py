@@ -105,8 +105,20 @@ def _load_allowlist(path: Path) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise SystemExit(f"{path}: allowlist must be a JSON list")
     for entry in data:
-        if not {"id", "reason", "expires"} <= set(entry):
+        if not isinstance(entry, dict) or not {"id", "reason", "expires"} <= set(entry):
             raise SystemExit(f"{path}: each entry needs id, reason, expires -- got {entry}")
+        if not (isinstance(entry["id"], str) and entry["id"].strip()):
+            raise SystemExit(f"{path}: entry 'id' must be a non-empty string -- got {entry}")
+        # A blank reason would suppress an advisory with no written justification,
+        # defeating the point of the allowlist (Codex P2). Require real text.
+        if not (isinstance(entry["reason"], str) and entry["reason"].strip()):
+            raise SystemExit(
+                f"{path}: entry 'reason' must be a non-empty written justification -- got {entry}"
+            )
+        try:
+            dt.date.fromisoformat(str(entry["expires"]))
+        except ValueError as exc:
+            raise SystemExit(f"{path}: entry 'expires' must be YYYY-MM-DD -- got {entry}") from exc
     return data
 
 
