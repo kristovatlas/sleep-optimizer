@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { SectionWrapper } from "./SectionWrapper";
+import { rowForProduct } from "./supplementRow";
 import { blurOnWheel } from "../../../wheelGuard";
 import { ApiError } from "../../../types/api";
 import type {
@@ -46,12 +47,18 @@ interface SupplementSectionProps {
   onChange: (entries: SupplementEntryCreate[]) => void;
   /** Library products; null = not loaded (fetch failed). */
   products: SupplementProduct[] | null;
+  /** Creates the library product AND (owner-side) appends its prefilled row
+   * to the form — the append happens in DailyLogPage via a functional,
+   * stale-date-guarded update, so a slow POST neither drops concurrent
+   * edits nor writes into a different day after navigation. */
   onCreateProduct: (
     data: SupplementProductCreate,
   ) => Promise<SupplementProduct>;
   /** Pulls yesterday's supplement rows into today's unsaved state (#110);
-   * resolves the number of entries pulled (0 = nothing logged yesterday). */
-  onCopyYesterday: () => Promise<number>;
+   * resolves the number of entries pulled (0 = nothing logged yesterday),
+   * or null when the response was stale — the user left the day mid-request
+   * — in which case no status message may be shown. */
+  onCopyYesterday: () => Promise<number | null>;
 }
 
 const UNITS = ["mg", "mcg", "IU", "g"];
@@ -74,15 +81,6 @@ function withDose(
   dose: number | null,
 ): SupplementEntryCreate {
   return { ...entry, dose_mg: dose, time: dose === 0 ? null : entry.time };
-}
-
-function rowForProduct(p: SupplementProduct): SupplementEntryCreate {
-  return {
-    time: null,
-    name: p.name,
-    dose_mg: p.default_dose ?? null,
-    product_id: p.id,
-  };
 }
 
 export function SupplementSection({
@@ -118,17 +116,29 @@ export function SupplementSection({
   const updateEntry = (index: number, updated: SupplementEntryCreate) =>
     onChange(entries.map((e, i) => (i === index ? updated : e)));
 
-  const addProductRow = (p: SupplementProduct) => {
-    onChange([...entries, rowForProduct(p)]);
+  const closePicker = () => {
     setPickerOpen(false);
     setFilter("");
     setShowCreate(false);
+  };
+
+  /** Picker path only (synchronous — `entries` is the current render's).
+   * The inline-create path must NOT use this: its row is appended by the
+   * page after the POST resolves (see onCreateProduct), because appending a
+   * pre-await `entries` snapshot would drop edits made during a slow POST. */
+  const addProductRow = (p: SupplementProduct) => {
+    onChange([...entries, rowForProduct(p)]);
+    closePicker();
   };
 
   const handleCopyYesterday = async () => {
     setCopyMsg(null);
     try {
       const n = await onCopyYesterday();
+      // null = stale (the user navigated to another day before the response
+      // arrived): the form was left untouched, so a status here would claim
+      // a copy that never landed on the day now in view.
+      if (n === null) return;
       setCopyMsg(
         n > 0
           ? `Copied ${n} supplement${n === 1 ? "" : "s"} from yesterday`
@@ -145,7 +155,9 @@ export function SupplementSection({
     setCreating(true);
     setCreateError(null);
     try {
-      const created = await onCreateProduct({
+      // The row append rides onCreateProduct (page layer): functional and
+      // stale-date-guarded there — see the prop doc.
+      await onCreateProduct({
         name,
         brand: draft.brand.trim() || null,
         form: draft.form.trim() || null,
@@ -166,7 +178,7 @@ export function SupplementSection({
         step: "",
         is_sticky: false,
       });
-      addProductRow(created);
+      closePicker();
     } catch (e) {
       setCreateError(
         e instanceof ApiError && typeof e.detail === "string" && e.detail

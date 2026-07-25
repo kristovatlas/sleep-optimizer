@@ -25,6 +25,7 @@ import { WarningBanner } from "./WarningBanner";
 import { CaffeineSection } from "./sections/CaffeineSection";
 import { MealSection } from "./sections/MealSection";
 import { SupplementSection } from "./sections/SupplementSection";
+import { rowForProduct } from "./sections/supplementRow";
 import { HabitSection } from "./sections/HabitSection";
 import { StimulatingSection } from "./sections/StimulatingSection";
 import { SexualActivitySection } from "./sections/SexualActivitySection";
@@ -50,6 +51,25 @@ const HABIT_ABSENCE_KEYS: Partial<Record<HabitType, string>> = {
   [HabitType.WARM_SHOWER]: "warm_shower",
 };
 
+/** Absence keys that count as a section's data for visibility: a recorded
+ * "none today" on an untracked section must render like entries do — hidden,
+ * it could be neither seen nor undone. Habits carries one key per habit
+ * type; supplements records none-today as 0-dose entry rows (never absence
+ * keys) and sexual activity has no absence control, so neither is listed. */
+const SECTION_ABSENCE_KEYS: Partial<Record<SectionKey, readonly string[]>> = {
+  caffeine: ["caffeine"],
+  meals: ["meal"],
+  habits: Object.values(HABIT_ABSENCE_KEYS).filter((k): k is string =>
+    Boolean(k),
+  ),
+  stimulating: ["stimulating"],
+  rituals: ["ritual"],
+  naps: ["nap"],
+  sunlight: ["sunlight"],
+  redLight: ["red_light"],
+  nsdr: ["nsdr"],
+};
+
 export function DailyLogPage() {
   const { currentDate, isToday, prev, next, today } = useDateNavigation();
   const {
@@ -73,10 +93,15 @@ export function DailyLogPage() {
   const [tracked] = useState(readTrackedSections);
 
   // An untracked section still renders when the viewed day holds data in
-  // it: hiding recorded entries would be worse than showing an extra
-  // section (and the form still submits the full payload either way).
+  // it — entries OR a recorded absence key: hiding recorded state would be
+  // worse than showing an extra section (and the form still submits the
+  // full payload either way).
   const visible = (key: SectionKey, hasData: boolean) =>
-    tracked.has(key) || hasData;
+    tracked.has(key) ||
+    hasData ||
+    (SECTION_ABSENCE_KEYS[key] ?? []).some((k) =>
+      formData.section_absences.includes(k),
+    );
 
   useEffect(() => {
     getSettings()
@@ -210,19 +235,35 @@ export function DailyLogPage() {
     setFormData(outToCreate(log));
   };
 
+  // Stale-response guard (mirrors useDailyLog's cancellation idiom): an
+  // async callback started while viewing one day must not write into the
+  // form after the user navigates to a different day — the ref tracks the
+  // currently viewed date, and each callback compares it against the date
+  // captured when the request started.
+  const viewedDateRef = useRef(currentDate);
+  useEffect(() => {
+    viewedDateRef.current = currentDate;
+  }, [currentDate]);
+
   /** #110: pull yesterday's supplement rows (products, doses, times) into
    * today's unsaved state. Each source row claims a DISTINCT pre-existing
    * row (split dosing — two rows of one product — must copy as two rows,
    * never collapse into one); unmatched source rows are appended. Resolves
-   * the number of source entries. */
-  const copyYesterdaySupplements = async (): Promise<number> => {
+   * the number of source entries, or null when the response is stale (the
+   * user navigated to another day mid-request): a stale response must
+   * neither merge yesterday-of-A's rows into day B's form nor surface a
+   * success/failure status that reads as belonging to day B. */
+  const copyYesterdaySupplements = async (): Promise<number | null> => {
+    const forDate = currentDate;
     let out: DailyLogOut;
     try {
-      out = await getDailyLog(addDays(currentDate, -1));
+      out = await getDailyLog(addDays(forDate, -1));
     } catch (e) {
+      if (viewedDateRef.current !== forDate) return null;
       if (e instanceof ApiError && e.status === 404) return 0;
       throw e;
     }
+    if (viewedDateRef.current !== forDate) return null;
     const rows = out.supplement_entries.map(
       ({ time, name, dose_mg, product_id }) => ({
         // A 0-dose row is "none today" and must never carry a time (it would
@@ -261,11 +302,27 @@ export function DailyLogPage() {
     return rows.length;
   };
 
+  /** Create a library product and append its prefilled row to the day the
+   * create started on. The append is FUNCTIONAL — edits made while the POST
+   * is in flight land on current state, not a snapshot — and date-guarded:
+   * a slow response arriving after navigation must not push a row into a
+   * different day's form. The library append has no date scope and always
+   * applies. */
   const handleCreateProduct = async (
     data: SupplementProductCreate,
   ): Promise<SupplementProduct> => {
+    const forDate = currentDate;
     const created = await createSupplementProduct(data);
     setProducts((prev) => (prev === null ? [created] : [...prev, created]));
+    if (viewedDateRef.current === forDate) {
+      setFormData((prev) => ({
+        ...prev,
+        supplement_entries: [
+          ...prev.supplement_entries,
+          rowForProduct(created),
+        ],
+      }));
+    }
     return created;
   };
 

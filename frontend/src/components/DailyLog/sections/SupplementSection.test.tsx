@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { SupplementSection } from "./SupplementSection";
+import { rowForProduct } from "./supplementRow";
 import type {
   SupplementEntryCreate,
   SupplementProduct,
@@ -41,7 +42,7 @@ interface HarnessProps {
   onCreateProduct?: (
     data: SupplementProductCreate,
   ) => Promise<SupplementProduct>;
-  onCopyYesterday?: () => Promise<number>;
+  onCopyYesterday?: () => Promise<number | null>;
 }
 
 function Harness({
@@ -198,8 +199,30 @@ describe("SupplementSection", () => {
       step: 0.5,
       is_sticky: false,
     };
-    const onCreateProduct = vi.fn(async () => created);
-    render(<Harness onCreateProduct={onCreateProduct} />);
+    const onCreateProduct = vi.fn(async (data: SupplementProductCreate) => ({
+      ...created,
+      name: data.name,
+    }));
+    // Owner harness mimicking DailyLogPage: the row append rides
+    // onCreateProduct as a FUNCTIONAL update after the POST resolves —
+    // the section itself never appends from a pre-await entries snapshot.
+    function OwnerHarness() {
+      const [entries, setEntries] = useState<SupplementEntryCreate[]>([]);
+      return (
+        <SupplementSection
+          entries={entries}
+          onChange={setEntries}
+          products={[melatonin, magnesium]}
+          onCreateProduct={async (data) => {
+            const p = await onCreateProduct(data);
+            setEntries((prev) => [...prev, rowForProduct(p)]);
+            return p;
+          }}
+          onCopyYesterday={vi.fn(async () => 0)}
+        />
+      );
+    }
+    render(<OwnerHarness />);
 
     await user.click(
       screen.getByRole("button", { name: "+ Add a supplement" }),
@@ -272,6 +295,19 @@ describe("SupplementSection", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "No supplements logged yesterday",
     );
+  });
+
+  it("a stale (null) copy-yesterday result shows no status message", async () => {
+    const user = userEvent.setup();
+    const onCopyYesterday = vi.fn(async () => null);
+    render(<Harness onCopyYesterday={onCopyYesterday} />);
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+    await waitFor(() => expect(onCopyYesterday).toHaveBeenCalledOnce());
+    // null = the user left the day mid-request; a "Copied"/"No supplements"
+    // status here would claim an outcome for a day the copy never touched.
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("Mark all none today zeroes every product row AND clears their times", async () => {

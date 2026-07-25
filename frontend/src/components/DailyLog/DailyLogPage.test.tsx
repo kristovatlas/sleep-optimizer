@@ -1,4 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -735,5 +741,240 @@ describe("DailyLogPage", () => {
     expect(
       screen.getAllByRole("spinbutton", { name: "Melatonin dose (mg)" }),
     ).toHaveLength(1); // applied once, not stacked
+  });
+
+  // --- stale-response guards: async supplement callbacks started on one
+  // day must not write into another day's form after navigation ---
+
+  it("a copy-yesterday response landing after date navigation is discarded", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    let resolveYesterday: (r: Response) => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([]));
+      }
+      if (urlStr.includes(`/api/daily-log/${yesterday}`)) {
+        // Yesterday-of-A hangs until the test resolves it
+        return new Promise<Response>((res) => {
+          resolveYesterday = res;
+        });
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Start the copy on day A, then leave for day B while it is in flight
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+
+    await act(async () => {
+      resolveYesterday(
+        new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: yesterday,
+            supplement_entries: [
+              {
+                id: 11,
+                date: yesterday,
+                time: "21:30:00",
+                name: "Melatonin",
+                dose_mg: 2.5,
+                product_id: 5,
+              },
+            ],
+          }),
+        ),
+      );
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Day B's form is fully rendered and untouched — the stale rows did not
+    // merge in, and no copy status leaks onto a day the copy never touched
+    expect(screen.getByText("Save")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  /** Mock where the viewed days are blank (or hold the given supplement
+   * rows) and the product-create POST hangs until the test resolves it. */
+  function mockDeferredCreate(supplementEntries: unknown[] = []) {
+    let resolveCreate: (r: Response) => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        if (init?.method === "POST") {
+          return new Promise<Response>((res) => {
+            resolveCreate = res;
+          });
+        }
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            supplement_entries: supplementEntries,
+          }),
+        );
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    return () => resolveCreate;
+  }
+
+  const apigenin = {
+    id: 9,
+    name: "Apigenin",
+    brand: null,
+    form: null,
+    default_dose: 50,
+    unit: "mg",
+    step: 0.5,
+    is_sticky: false,
+  };
+
+  /** Open the picker's create form, name the product, and submit. */
+  async function submitCreate(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      screen.getByRole("button", { name: "+ Add a supplement" }),
+    );
+    await user.click(screen.getByRole("button", { name: "+ New product" }));
+    await user.type(screen.getByLabelText("New product name"), "Apigenin");
+    await user.click(screen.getByRole("button", { name: "Add to library" }));
+  }
+
+  it("edits made while a product-create POST is pending survive its resolution", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const getResolve = mockDeferredCreate([
+      {
+        id: 1,
+        date: "2024-06-15",
+        time: null,
+        name: "Melatonin",
+        dose_mg: 3,
+        product_id: 5,
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await submitCreate(user);
+    // POST in flight — a concurrent edit to an existing row must not be
+    // lost to a pre-await entries snapshot when the create lands
+    fireEvent.change(
+      screen.getByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      { target: { value: "7" } },
+    );
+
+    await act(async () => {
+      getResolve()(new Response(JSON.stringify(apigenin)));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Both survive: the concurrent edit AND the appended new row
+    expect(
+      screen.getByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(7);
+    expect(
+      screen.getByRole("spinbutton", { name: "Apigenin dose (mg)" }),
+    ).toHaveValue(50);
+  });
+
+  it("a product-create response landing after date navigation appends nothing", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const getResolve = mockDeferredCreate();
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await submitCreate(user);
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+
+    await act(async () => {
+      getResolve()(new Response(JSON.stringify(apigenin)));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Day B's form gains no row from day A's create...
+    expect(screen.getByText("Save")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("spinbutton", { name: "Apigenin dose (mg)" }),
+    ).not.toBeInTheDocument();
+    // ...but the library membership (date-independent) still applies
+    await user.click(
+      screen.getByRole("button", { name: "+ Add a supplement" }),
+    );
+    expect(
+      screen.getByRole("button", { name: /Apigenin/ }),
+    ).toBeInTheDocument();
+  });
+
+  // --- #159/#161: absence-only days on untracked sections stay visible ---
+
+  it("an untracked section with only a recorded absence renders and can be undone", async () => {
+    // Legacy bare array: caffeine and habits untracked
+    localStorage.setItem("somnus-tracked-sections", JSON.stringify(["meals"]));
+    mockFetch({ ...mockLogOut, section_absences: ["caffeine"] });
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Meals")).toBeInTheDocument();
+    });
+
+    // No entries, untracked — but the recorded "none today" must be
+    // visible, not invisible-and-unremovable
+    expect(screen.getByText("Caffeine")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Undo — restore caffeine today" }),
+    );
+    // Undo cleared the recorded state; nothing left → the untracked
+    // section hides again
+    await waitFor(() => {
+      expect(screen.queryByText("Caffeine")).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual([]);
+    });
+  });
+
+  it("untracked Habits renders when any habit absence key is recorded", async () => {
+    localStorage.setItem("somnus-tracked-sections", JSON.stringify(["meals"]));
+    mockFetch({ ...mockLogOut, section_absences: ["sauna"] });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Meals")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Habits")).toBeInTheDocument();
   });
 });
