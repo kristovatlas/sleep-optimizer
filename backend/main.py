@@ -10,7 +10,16 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.config import codespaces_hosts, settings
 from backend.database import init_db
-from backend.routers import analysis, daily_log, dashboard, export, oura, recommendations, reports
+from backend.routers import (
+    analysis,
+    daily_log,
+    dashboard,
+    export,
+    oura,
+    recommendations,
+    reports,
+    supplements,
+)
 from backend.routers import settings as settings_router
 from backend.schemas import HealthResponse
 
@@ -57,6 +66,7 @@ app.include_router(dashboard.router)
 app.include_router(analysis.router)
 app.include_router(recommendations.router)
 app.include_router(reports.router)
+app.include_router(supplements.router)
 
 if os.environ.get("SOMNUS_TESTING") == "1":
     from backend.routers.testing import router as testing_router

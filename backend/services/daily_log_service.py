@@ -19,6 +19,7 @@ from backend.models import (
     NSDREntry,
     PreBedRitualEntry,
     RedLightEntry,
+    SectionAbsence,
     SexualActivityEntry,
     StimulatingActivityEntry,
     SunlightEntry,
@@ -150,6 +151,13 @@ def copy_day(db: Session, target_date: dt.date, source_date: dt.date) -> DailyLo
         else:
             _clone_entry(db, source_entries, model_cls, target_date)
 
+    # ENTRY_TYPE_MAP omits section absences, so a plain copy would drop the
+    # day's explicit negatives (#161 Lane 3a). Clone them onto the target date;
+    # supplement_entries' product_id rides along via _clone_entry's column
+    # introspection (it copies every non-id column, product_id included).
+    for absence in source.section_absences:
+        db.add(SectionAbsence(date=target_date, section_key=absence.section_key))
+
     db.commit()
     db.refresh(target)
     return target
@@ -233,6 +241,19 @@ def _create_sub_entries(db: Session, date: dt.date, data: DailyLogCreate) -> Non
     if data.sexual_activity_entry is not None:
         entry = SexualActivityEntry(date=date, **data.sexual_activity_entry.model_dump())
         db.add(entry)
+
+    # Section absences (#161 Lane 3a): explicit "did not do X" rows share the
+    # sub-entry lifecycle. save_daily_log deletes-then-recreates the DailyLog,
+    # and cascade="all, delete-orphan" wipes the old absences with it — so they
+    # MUST be recreated here or every save would silently destroy them (the
+    # validated Lane-1 write-path landmine). Dedupe on section_key; the model's
+    # unique (date, section_key) is the backstop.
+    _seen_absences: set[str] = set()
+    for section_key in data.section_absences:
+        if section_key in _seen_absences:
+            continue
+        _seen_absences.add(section_key)
+        db.add(SectionAbsence(date=date, section_key=section_key))
 
     db.flush()
 

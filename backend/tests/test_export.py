@@ -157,6 +157,77 @@ def test_export_csv_leaves_safe_values_untouched(client: TestClient) -> None:
     assert "'Good day" not in daily_csv
 
 
+# --- Section absences + supplement products round-trip (#161 Lane 3a) ---
+
+
+def _seed_absence_and_product(client: TestClient) -> int:
+    """Seed a product + a day linking it, plus explicit absences. Returns pid."""
+    pid: int = client.post(
+        "/api/supplement-products",
+        json={"name": "Magnesium Glycinate", "brand": "Pure", "unit": "mg"},
+    ).json()["id"]
+    client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "supplement_entries": [
+                {"name": "Magnesium Glycinate", "dose_mg": 200, "product_id": pid}
+            ],
+            "section_absences": ["caffeine", f"supplement:{pid}"],
+        },
+    )
+    return pid
+
+
+def test_export_json_includes_absences_and_product_link(client: TestClient) -> None:
+    pid = _seed_absence_and_product(client)
+    data = client.get("/api/export?format=json").json()
+
+    log = data["daily_logs"][0]
+    assert sorted(log["section_absences"]) == sorted(["caffeine", f"supplement:{pid}"])
+    assert log["supplement_entries"][0]["product_id"] == pid
+
+    products = data["supplement_products"]
+    assert len(products) == 1
+    assert products[0]["id"] == pid
+    assert products[0]["name"] == "Magnesium Glycinate"
+
+
+def test_export_json_round_trips_through_put(client: TestClient) -> None:
+    """A one-way export is only faithful if re-PUTting its shape restores the
+    explicit negatives + product link (no silent negative->unknown conversion)."""
+    pid = _seed_absence_and_product(client)
+    exported = client.get("/api/export?format=json").json()["daily_logs"][0]
+
+    # Wipe the day, then re-save from the exported representation.
+    client.delete("/api/daily-log/2025-06-15")
+    restore = client.put("/api/daily-log/2025-06-15", json=exported)
+    assert restore.status_code == 200, restore.text
+
+    reloaded = client.get("/api/daily-log/2025-06-15").json()
+    assert sorted(reloaded["section_absences"]) == sorted(["caffeine", f"supplement:{pid}"])
+    assert reloaded["supplement_entries"][0]["product_id"] == pid
+
+
+def test_export_csv_contains_absences_and_products(client: TestClient) -> None:
+    pid = _seed_absence_and_product(client)
+    resp = client.get("/api/export?format=csv")
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    names = zf.namelist()
+    assert "section_absences.csv" in names
+    assert "supplement_products.csv" in names
+
+    absence_rows = list(csv.DictReader(io.StringIO(zf.read("section_absences.csv").decode())))
+    keys = {r["section_key"] for r in absence_rows}
+    assert keys == {"caffeine", f"supplement:{pid}"}
+    assert all(r["date"] == "2025-06-15" for r in absence_rows)
+
+    product_rows = list(csv.DictReader(io.StringIO(zf.read("supplement_products.csv").decode())))
+    assert product_rows[0]["name"] == "Magnesium Glycinate"
+
+    supp_rows = list(csv.DictReader(io.StringIO(zf.read("supplement_entries.csv").decode())))
+    assert supp_rows[0]["product_id"] == str(pid)
+
+
 # --- Invalid format ---
 
 

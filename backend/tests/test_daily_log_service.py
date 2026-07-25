@@ -9,7 +9,9 @@ from backend.models import (
     CaffeineSource,
     DailyLog,
     NSDRType,
+    SectionAbsence,
     SexualActivityType,
+    SupplementProduct,
 )
 from backend.schemas import (
     CaffeineEntryCreate,
@@ -17,6 +19,7 @@ from backend.schemas import (
     NapEntryCreate,
     NSDREntryCreate,
     SexualActivityCreate,
+    SupplementEntryCreate,
 )
 from backend.services.daily_log_service import (
     add_sub_entry,
@@ -103,6 +106,68 @@ def test_save_empty_log(db: Session) -> None:
     log = save_daily_log(db, D1, DailyLogCreate())
     assert log.date == D1
     assert log.caffeine_entries == []
+
+
+# --- save_daily_log: section absences + supplement product links (#161 Lane 3a) ---
+
+
+def test_save_preserves_absence_in_payload(db: Session) -> None:
+    """The validated write-path landmine: save deletes-then-recreates the log,
+    and the cascade wipes absences — a save that carries the absence forward in
+    its payload must recreate it, not orphan-delete it."""
+    save_daily_log(db, D1, DailyLogCreate(section_absences=["caffeine", "sauna"]))
+    assert {a.section_key for a in db.query(SectionAbsence).all()} == {"caffeine", "sauna"}
+
+    # Edit an unrelated field; keep "caffeine" in the payload, drop "sauna".
+    log = save_daily_log(db, D1, DailyLogCreate(notes="edited", section_absences=["caffeine"]))
+    keys = {a.section_key for a in log.section_absences}
+    # "caffeine" survives (it was in the payload); "sauna" is gone (replace
+    # semantics — it was omitted), proving the save discriminates by payload.
+    assert keys == {"caffeine"}
+    assert db.query(SectionAbsence).count() == 1
+
+
+def test_save_dedupes_repeated_absence_keys(db: Session) -> None:
+    log = save_daily_log(db, D1, DailyLogCreate(section_absences=["sauna", "sauna", "nsdr"]))
+    assert sorted(a.section_key for a in log.section_absences) == ["nsdr", "sauna"]
+
+
+def test_save_with_no_absences_leaves_none(db: Session) -> None:
+    log = save_daily_log(db, D1, DailyLogCreate(notes="plain"))
+    assert log.section_absences == []
+
+
+def test_save_preserves_supplement_product_link(db: Session) -> None:
+    product = SupplementProduct(name="Magnesium Glycinate", unit="mg")
+    db.add(product)
+    db.flush()
+
+    save_daily_log(
+        db,
+        D1,
+        DailyLogCreate(
+            supplement_entries=[
+                SupplementEntryCreate(
+                    name="Magnesium Glycinate", dose_mg=200, product_id=product.id
+                )
+            ]
+        ),
+    )
+    reloaded = get_daily_log(db, D1)
+    assert reloaded is not None
+    assert len(reloaded.supplement_entries) == 1
+    assert reloaded.supplement_entries[0].product_id == product.id
+    assert reloaded.supplement_entries[0].dose_mg == 200
+
+
+def test_save_free_text_supplement_keeps_product_id_null(db: Session) -> None:
+    """Regression: legacy free-text supplement (no product) stays un-linked."""
+    log = save_daily_log(
+        db,
+        D1,
+        DailyLogCreate(supplement_entries=[SupplementEntryCreate(name="Fish oil", dose_mg=1000)]),
+    )
+    assert log.supplement_entries[0].product_id is None
 
 
 # --- get_daily_log ---
@@ -211,6 +276,36 @@ def test_copy_day_overwrites_target(db: Session) -> None:
     assert target is not None
     assert len(target.caffeine_entries) == 1
     assert target.caffeine_entries[0].amount_mg == 100
+
+
+def test_copy_day_carries_absences(db: Session) -> None:
+    """copy_day iterates ENTRY_TYPE_MAP, which omits absences — the copy must
+    clone them onto the target date or a "None today" negative is silently lost."""
+    save_daily_log(db, D1, DailyLogCreate(section_absences=["caffeine", "supplement:3"]))
+    target = copy_day(db, D2, D1)
+    assert target is not None
+    assert {a.section_key for a in target.section_absences} == {"caffeine", "supplement:3"}
+    assert all(a.date == D2 for a in target.section_absences)
+
+
+def test_copy_day_carries_supplement_product_id(db: Session) -> None:
+    product = SupplementProduct(name="L-Theanine", unit="mg")
+    db.add(product)
+    db.flush()
+    save_daily_log(
+        db,
+        D1,
+        DailyLogCreate(
+            supplement_entries=[
+                SupplementEntryCreate(name="L-Theanine", dose_mg=200, product_id=product.id)
+            ]
+        ),
+    )
+    target = copy_day(db, D2, D1)
+    assert target is not None
+    assert len(target.supplement_entries) == 1
+    assert target.supplement_entries[0].product_id == product.id
+    assert target.supplement_entries[0].date == D2
 
 
 def test_copy_day_source_not_found(db: Session) -> None:

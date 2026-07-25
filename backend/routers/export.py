@@ -9,6 +9,7 @@ import sqlite3
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -16,11 +17,18 @@ from sqlalchemy.orm import Session
 
 from backend.config import settings as app_settings
 from backend.database import get_db
-from backend.models import SleepRecord
-from backend.schemas import DailyLogOut, ExportData, SleepRecordOut
+from backend.models import SleepRecord, SupplementProduct
+from backend.schemas import DailyLogOut, ExportData, SleepRecordOut, SupplementProductOut
 from backend.services.daily_log_service import list_daily_logs
 
 router = APIRouter(prefix="/api", tags=["export"])
+
+
+class _AbsenceRow(NamedTuple):
+    """A flat (date, section_key) pair for the section_absences CSV (#161)."""
+
+    date: dt.date
+    section_key: str
 
 
 @router.get("/export", response_model=None)
@@ -44,16 +52,29 @@ def export_data(
         sleep_query = sleep_query.filter(SleepRecord.date <= end_date)
     sleep_records = [SleepRecordOut.model_validate(r) for r in sleep_query.all()]
 
+    # #161 Lane 3a: the supplement library is date-independent, so it is exported
+    # whole (not date-filtered) — logged entries reference products by id, and a
+    # partial-range export must still resolve those ids.
+    products = [
+        SupplementProductOut.model_validate(p)
+        for p in db.query(SupplementProduct).order_by(SupplementProduct.id).all()
+    ]
+
     if format == "json":
-        return ExportData(daily_logs=daily_logs_out, sleep_records=sleep_records)
+        return ExportData(
+            daily_logs=daily_logs_out,
+            sleep_records=sleep_records,
+            supplement_products=products,
+        )
 
     # CSV zip
-    return _build_csv_zip(daily_logs_out, sleep_records)
+    return _build_csv_zip(daily_logs_out, sleep_records, products)
 
 
 def _build_csv_zip(
     daily_logs: list[DailyLogOut],
     sleep_records: list[SleepRecordOut],
+    supplement_products: list[SupplementProductOut],
 ) -> StreamingResponse:
     """Build a zip file containing one CSV per table."""
     buf = io.BytesIO()
@@ -131,6 +152,7 @@ def _build_csv_zip(
                     "time",
                     "name",
                     "dose_mg",
+                    "product_id",
                 ],
             ),
             (
@@ -227,6 +249,31 @@ def _build_csv_zip(
                 sexual_entries,
                 ["id", "date", "time", "activity_type"],
             ),
+        )
+
+        # Supplement library (#161 Lane 3a): product identity that entries
+        # reference by product_id — without it a re-import loses which product
+        # each entry is.
+        zf.writestr(
+            "supplement_products.csv",
+            _to_csv(
+                supplement_products,
+                ["id", "name", "brand", "form", "default_dose", "unit", "step", "is_sticky"],
+            ),
+        )
+
+        # Section absences (#161 Lane 3a): explicit "did not do X" negatives.
+        # DailyLogOut.section_absences is the bare key strings, so pair each with
+        # its log's date. Omitting these would silently convert every explicit
+        # negative back to "unknown" on re-import and change correlations.
+        absence_rows = [
+            _AbsenceRow(date=log.date, section_key=key)
+            for log in daily_logs
+            for key in log.section_absences
+        ]
+        zf.writestr(
+            "section_absences.csv",
+            _to_csv(absence_rows, ["date", "section_key"]),
         )
 
     buf.seek(0)

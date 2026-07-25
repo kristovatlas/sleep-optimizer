@@ -100,6 +100,9 @@ class SupplementEntryCreate(BaseModel):
     time: dt.time | None = None
     name: str = Field(max_length=100)
     dose_mg: float | None = None
+    # #161 Lane 3a: optional link to a library product. NULL = legacy free-text
+    # entry (un-analyzed). The value is in the product's unit (see the model).
+    product_id: int | None = None
 
 
 class SupplementEntryOut(BaseModel):
@@ -108,6 +111,45 @@ class SupplementEntryOut(BaseModel):
     time: dt.time | None = None
     name: str
     dose_mg: float | None = None
+    product_id: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
+# --- Supplement Product (library, #161 Lane 3a) ---
+
+
+class SupplementProductCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    brand: str | None = Field(default=None, max_length=100)
+    form: str | None = Field(default=None, max_length=50)
+    default_dose: float | None = Field(default=None, ge=0)
+    unit: str = Field(default="mg", min_length=1, max_length=10)
+    step: float = Field(default=0.5, gt=0)
+    is_sticky: bool = False
+
+
+class SupplementProductUpdate(BaseModel):
+    """Partial update — only supplied fields change (PATCH semantics)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    brand: str | None = Field(default=None, max_length=100)
+    form: str | None = Field(default=None, max_length=50)
+    default_dose: float | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, min_length=1, max_length=10)
+    step: float | None = Field(default=None, gt=0)
+    is_sticky: bool | None = None
+
+
+class SupplementProductOut(BaseModel):
+    id: int
+    name: str
+    brand: str | None = None
+    form: str | None = None
+    default_dose: float | None = None
+    unit: str
+    step: float
+    is_sticky: bool
 
     model_config = {"from_attributes": True}
 
@@ -310,6 +352,10 @@ class DailyLogCreate(BaseModel):
     sunlight_entries: list[SunlightEntryCreate] = []
     red_light_entries: list[RedLightEntryCreate] = []
     nsdr_entries: list[NSDREntryCreate] = []
+    # #161 Lane 3a: explicit "did not do X" section keys for the day (e.g.
+    # "caffeine", "sauna", "supplement:<product_id>"). A save replaces the day's
+    # absences with this list (same lifecycle as sub-entries). See ADR 003.
+    section_absences: list[str] = []
 
 
 class DailyLogOut(BaseModel):
@@ -328,8 +374,19 @@ class DailyLogOut(BaseModel):
     sunlight_entries: list[SunlightEntryOut] = []
     red_light_entries: list[RedLightEntryOut] = []
     nsdr_entries: list[NSDREntryOut] = []
+    # Serialized as the bare section_key strings — the before-validator maps the
+    # ORM SectionAbsence rows (from model_validate) down to their keys.
+    section_absences: list[str] = []
 
     model_config = {"from_attributes": True}
+
+    @field_validator("section_absences", mode="before")
+    @classmethod
+    def _absence_keys(cls, value: object) -> list[str]:
+        """Accept ORM SectionAbsence rows or plain strings, emit key strings."""
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [item if isinstance(item, str) else item.section_key for item in value]
 
 
 # --- User Settings ---
@@ -364,6 +421,10 @@ class ExportData(BaseModel):
 
     daily_logs: list[DailyLogOut] = []
     sleep_records: list[SleepRecordOut] = []
+    # #161 Lane 3a: the supplement library, so an export carries product
+    # identity (name/brand/form/dose unit) that logged entries reference by
+    # product_id — otherwise a re-import would lose which product each entry is.
+    supplement_products: list[SupplementProductOut] = []
 
 
 # --- User Settings ---

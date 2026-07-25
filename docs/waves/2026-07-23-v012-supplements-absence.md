@@ -90,7 +90,34 @@ management are Lane 3.
   `backend/tests/test_migrations.py`, this plan file.
 
 ## Lane 3 — Daily Log write-path + UX + input speed (backend + frontend, off Lane 2)
-**UX mockup → owner sign-off before build.**
+**Split into 3a (backend) and 3b (frontend).**
+
+- **Lane 3a — write-path + supplement library CRUD (backend) — DONE
+  (`feat/161-writepath`).** Landed the BLOCKING write-path items below
+  atomically: `section_absences` exposed on `DailyLogCreate`/`DailyLogOut`
+  (bare key strings), `save_daily_log` recreates them in `_create_sub_entries`
+  (dedupe; replace semantics) so a save no longer orphan-wipes them,
+  `copy_day` clones them onto the target date, and `SupplementEntryCreate`/
+  `Out` expose `product_id` so entry↔product links round-trip through save and
+  copy. New `backend/routers/supplements.py` = supplement library CRUD
+  (GET list / POST / GET one / PATCH / DELETE) — **delete policy: a product
+  referenced by any logged entry returns 409 (never hard-delete-orphans);
+  only unreferenced products delete. No `is_retired` column, so no new
+  migration** (schema fields already shipped in Lane 2's migration 005).
+  Exports (`backend/routers/export.py`): JSON `ExportData` now carries
+  `supplement_products` + per-day `section_absences` + entry `product_id`; the
+  CSV archive adds `supplement_products.csv` + `section_absences.csv` and a
+  `product_id` column on `supplement_entries.csv`. Export is one-way (no import
+  endpoint), so faithfulness is proven by a JSON export→re-PUT round-trip test
+  restoring absences + product link. Tests: save-preserves-absence (+ its
+  drop-the-omitted-key discrimination), save/copy product-link, export
+  round-trip, library CRUD incl. delete-referenced-409.
+- **Lane 3b — Daily Log UI (frontend, off 3a) — TODO.** The v3 mock: generic
+  "None today" affordance per section + per-supplement "didn't take it", the
+  library pick UI (inline + settings + onboarding seed), #110 quick-add /
+  common-dose chips. Consumes the 3a write-path + library API.
+
+**UX mockup → owner sign-off before build (3b).**
 
 **BLOCKING write-path requirements (Codex P1/P2 on Lane 1, validated real —
 these MUST land atomically with the absence write-API so dev never has a
