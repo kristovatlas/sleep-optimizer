@@ -19,10 +19,12 @@ from backend.models import (
     NSDREntry,
     PreBedRitualEntry,
     RedLightEntry,
+    SectionAbsence,
     SexualActivityEntry,
     StimulatingActivityEntry,
     SunlightEntry,
     SupplementEntry,
+    SupplementProduct,
 )
 from backend.schemas import (
     CaffeineEntryCreate,
@@ -38,6 +40,56 @@ from backend.schemas import (
     SunlightEntryCreate,
     SupplementEntryCreate,
 )
+
+# Absence keys namespaced ``supplement:<product_id>`` (#161 Lane 2/3a). The
+# literal is duplicated from stats_engine._SUPP_ABSENCE_PREFIX on purpose —
+# importing the stats engine here just for a string would couple the write
+# path to the analysis layer.
+_SUPPLEMENT_ABSENCE_PREFIX = "supplement:"
+
+
+class UnknownSupplementAbsenceKeyError(ValueError):
+    """A ``supplement:<id>`` absence key does not resolve to a library product.
+
+    Raised at save time (the check needs the DB session, so it cannot live on
+    the Pydantic schema); the router maps it to a 422.
+    """
+
+
+def _validate_supplement_absence_key(db: Session, section_key: str) -> None:
+    """Reject a ``supplement:*`` absence key that names no library product.
+
+    Without this, ``supplement:9999`` (nonexistent) or ``supplement:abc`` would
+    be stored and the stats engine would manufacture an unlabeled ghost
+    predictor (``supplement_dose_9999``) — or junk would sit in the table.
+    The suffix must be a canonical base-10 id (digits only, no sign/leading
+    zeros — a non-canonical spelling like ``supplement:007`` would evade the
+    exact-string reference checks in the delete/unit-change guards) and that
+    product must exist.
+
+    Plain (non-``supplement:``) keys are deliberately NOT validated here: the
+    stats engine's aggregation only maps known section names, so an unknown
+    plain key (e.g. ``"quux"``) is stored-but-inert — tolerated for
+    forward-compat, and validating it would couple this service to the
+    engine's ``_ABSENCE_*`` maps. Only ``supplement:*`` fabricates dynamic
+    predictor columns, so only it is checked strictly.
+    """
+    raw_pid = section_key[len(_SUPPLEMENT_ABSENCE_PREFIX) :]
+    # len cap keeps int() 64-bit-safe (SQLite ids); isascii+isdigit rejects
+    # signs, whitespace, and unicode digits; the round-trip rejects leading
+    # zeros. int(raw_pid) is then guaranteed to parse.
+    if (
+        not raw_pid.isascii()
+        or not raw_pid.isdigit()
+        or len(raw_pid) > 18
+        or str(int(raw_pid)) != raw_pid
+        or db.get(SupplementProduct, int(raw_pid)) is None
+    ):
+        # T-05: static message — never echo the (user-supplied) key.
+        raise UnknownSupplementAbsenceKeyError(
+            "section_absences contains a supplement key referencing an unknown product"
+        )
+
 
 # Maps entry_type URL segment → (ORM model, Pydantic create schema, DailyLog relationship name)
 ENTRY_TYPE_MAP: dict[str, tuple[type[Any], type[Any], str]] = {
@@ -150,6 +202,15 @@ def copy_day(db: Session, target_date: dt.date, source_date: dt.date) -> DailyLo
         else:
             _clone_entry(db, source_entries, model_cls, target_date)
 
+    # ENTRY_TYPE_MAP omits section absences, so a plain copy would drop the
+    # day's explicit negatives (#161 Lane 3a). Clone them onto the target date;
+    # supplement_entries' product_id rides along via _clone_entry's column
+    # introspection (it copies every non-id column, product_id included).
+    # No supplement:* re-validation needed: stored keys were validated at save
+    # time, and the delete guard keeps absence-referenced products alive.
+    for absence in source.section_absences:
+        db.add(SectionAbsence(date=target_date, section_key=absence.section_key))
+
     db.commit()
     db.refresh(target)
     return target
@@ -234,11 +295,33 @@ def _create_sub_entries(db: Session, date: dt.date, data: DailyLogCreate) -> Non
         entry = SexualActivityEntry(date=date, **data.sexual_activity_entry.model_dump())
         db.add(entry)
 
+    # Section absences (#161 Lane 3a): explicit "did not do X" rows share the
+    # sub-entry lifecycle. save_daily_log deletes-then-recreates the DailyLog,
+    # and cascade="all, delete-orphan" wipes the old absences with it — so they
+    # MUST be recreated here or every save would silently destroy them (the
+    # validated Lane-1 write-path landmine). Dedupe on section_key; the model's
+    # unique (date, section_key) is the backstop. supplement:* keys must name a
+    # real library product (raises UnknownSupplementAbsenceKeyError → router
+    # 422; save_daily_log has not committed yet, so the rollback restores any
+    # pre-existing day intact).
+    _seen_absences: set[str] = set()
+    for section_key in data.section_absences:
+        if section_key in _seen_absences:
+            continue
+        _seen_absences.add(section_key)
+        if section_key.startswith(_SUPPLEMENT_ABSENCE_PREFIX):
+            _validate_supplement_absence_key(db, section_key)
+        db.add(SectionAbsence(date=date, section_key=section_key))
+
     db.flush()
 
 
 def has_entries(log: DailyLog) -> bool:
-    """Check if a daily log has any sub-entries."""
+    """Check if a daily log has any sub-entries or explicit absence records.
+
+    Section absences count: an explicit "none today" is recorded data (ADR 003
+    amendment), so an absence-only day is a day with data in list/summary views.
+    """
     for _entry_type, (_model_cls, _schema_cls, rel_name) in ENTRY_TYPE_MAP.items():
         entries = getattr(log, rel_name)
         if entries is None:
@@ -247,4 +330,4 @@ def has_entries(log: DailyLog) -> bool:
             return True
         if not isinstance(entries, list) and entries is not None:
             return True
-    return False
+    return len(log.section_absences) > 0

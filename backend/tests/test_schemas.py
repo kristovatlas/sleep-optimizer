@@ -110,3 +110,32 @@ def test_daily_log_create_all_optional() -> None:
     log = DailyLogCreate()
     assert log.is_sick is None
     assert log.caffeine_entries == []
+
+
+# --- section_absences mapping (#161 Lane 3a) ---
+
+
+class _FakeAbsence:
+    """Stand-in for an ORM SectionAbsence row (has a section_key attribute)."""
+
+    def __init__(self, section_key: str) -> None:
+        self.section_key = section_key
+
+
+def test_daily_log_out_maps_orm_absences_to_keys() -> None:
+    """model_validate feeds ORM rows; the before-validator emits their keys."""
+    out = DailyLogOut(
+        date=dt.date(2025, 6, 15),
+        section_absences=[_FakeAbsence("caffeine"), _FakeAbsence("sauna")],  # type: ignore[list-item]
+    )
+    assert out.section_absences == ["caffeine", "sauna"]
+
+
+def test_daily_log_out_accepts_plain_string_keys() -> None:
+    out = DailyLogOut(date=dt.date(2025, 6, 15), section_absences=["nsdr"])
+    assert out.section_absences == ["nsdr"]
+
+
+def test_daily_log_out_non_list_absences_defaults_empty() -> None:
+    out = DailyLogOut(date=dt.date(2025, 6, 15), section_absences=None)  # type: ignore[arg-type]
+    assert out.section_absences == []

@@ -1,0 +1,54 @@
+{
+  "leg": "claude-code-review",
+  "model": "claude-fable-5",
+  "reviewed_diff_sha256": "e647eb9ddb2a7c123a5c33c2756229c7a50382646776c5721b5236e81ec745df",
+  "reviewed_at": "2026-07-25",
+  "raw_output": "Lane 3a review (Claude, Fable 5): comprehensive battery @2893e63 + full re-run @1409097 + focused delta verification @018dd28 (48/48 live adversarial probes). Suites at every round, real exit codes; final: pytest 670 passed (cov >= floors), mypy 0, ruff 0, ruff format 0; frontend untouched. VERIFIED: landmine fix complete (save recreates absences on the only save path, replace semantics = sub-entry lifecycle; copy clones; delete-day intended); failed-PUT rollback preserves day byte-for-byte; DailyLogOut validator; both delete guards + unit guard compose airtightly with canonical-form keys (lifecycle-probed); has_entries semantics; no echo of user text in any new error detail (marker-probed).\n\n--- Review history (5 rounds; converged) ---\nR1 (Claude full battery @2893e63): P1 composite-PUT FK 500 leaking bound params -> 409+rollback (empirically: failed PUT preserves pre-existing day, single transaction); P2 PATCH-null 500 -> 422 validator; P3 unbounded section_key -> 1..150; CSV injection VERIFIED CLEAN (new files reuse neutralizer, probed). R2 (Codex review @2893e63, convergent on R1 items +2 new): product delete missed absence-only refs -> 409 guard; has_entries ignored absences -> counts them. R3 (Codex review @1409097): unit change on referenced product reinterprets history -> unit immutable w/ history; unvalidated supplement:<pid> keys create ghost predictors -> canonical-form + existence validation at save (incl. leading-zeros evasion of exact-string guards). R3-delta (Codex review @018dd28): negative dose corrupts sums -> ge=0+finite; 1e309->inf poison row 500s all subsequent GETs -> allow_inf_nan=False + product_id bounded to 2**63-1 + a RequestValidationError handler sanitizing non-finite floats so the 422 itself is deliverable (FastAPI's default crashed rendering the echo). Final Claude delta-verification @018dd28: PASS, 48/48 adversarial probes, guard composition proven airtight (canonicalization + exact-string refs); Codex security @018dd28: NO FINDINGS. The R3-delta commits (40433a9, e5b053e) fix Codex's own final findings + tests + lint; full suite 670 passed at the attested head. Per the anti-loop rule, three unreachable-by-construction footnotes (engine-side lenient parse \u2014 no write path can store non-canonical keys; 19-digit id cap vs autoincrement reality; near-miss prefixes inert) are recorded, not cycled on.",
+  "findings": [
+    {
+      "id": "R1-P1",
+      "summary": "Composite PUT unhandled 500 on bogus product_id, traceback logs bound health-data params",
+      "severity_claimed": "P1",
+      "validated": true,
+      "severity_validated": "P1",
+      "disposition": "fixed",
+      "reason": "IntegrityError -> rollback -> static 409; empirical preservation test (16b4e8a)"
+    },
+    {
+      "id": "R1-P2",
+      "summary": "PATCH explicit null on non-nullable product fields -> 500",
+      "severity_claimed": "P2",
+      "validated": true,
+      "severity_validated": "P2",
+      "disposition": "fixed",
+      "reason": "model_validator rejects explicit None on name/unit/step/is_sticky; nullable clearing intact (16b4e8a)"
+    },
+    {
+      "id": "R1-P3",
+      "summary": "section_absences items unbounded vs String(150)",
+      "severity_claimed": "P3",
+      "validated": true,
+      "severity_validated": "P3",
+      "disposition": "fixed",
+      "reason": "per-item 1..150 (16b4e8a)"
+    },
+    {
+      "id": "R1-D",
+      "summary": "Old-schema client PUT wipes absences (replace semantics)",
+      "severity_claimed": "P2",
+      "validated": true,
+      "severity_validated": "P3",
+      "disposition": "dismissed",
+      "reason": "coherent replace semantics matching every sub-entry list; recorded as the 3b client contract in the wave doc (client must round-trip section_absences); nothing user-visible at risk pre-3b (shipped UI can't create absences)"
+    },
+    {
+      "id": "FN",
+      "summary": "Footnotes: engine-side lenient key parse; 19-digit id cap; near-miss prefixes inert",
+      "severity_claimed": "nit",
+      "validated": true,
+      "severity_validated": "nit",
+      "disposition": "dismissed",
+      "reason": "each unreachable by construction (no write path can store non-canonical keys; autoincrement ids; case-sensitive prefix match produces no ghost columns \u2014 probed)"
+    }
+  ]
+}

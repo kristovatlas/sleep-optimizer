@@ -1,6 +1,12 @@
 """Tests for daily log HTTP endpoints."""
 
+import datetime as dt
+
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from backend.models import SleepRecord
+from backend.services.stats_engine import prepare_analysis_dataframe
 
 # The SPA's fetch client always sends this header; the T-02 CSRF guard on the
 # bodiless copy-from POST requires it (requests with a JSON body get it from
@@ -165,6 +171,20 @@ def test_list_logs_has_entries_flag(client: TestClient) -> None:
     resp = client.get("/api/daily-log")
     data = resp.json()
     assert data[0]["has_entries"] is True
+    assert data[1]["has_entries"] is False
+
+
+def test_list_logs_has_entries_counts_absence_only_day(client: TestClient) -> None:
+    """A day with only a 'none today' absence record has recorded data (ADR 003
+    amendment) — the summary must report has_entries=True; a truly blank day
+    stays False."""
+    client.put("/api/daily-log/2025-06-15", json={"section_absences": ["caffeine"]})
+    client.put("/api/daily-log/2025-06-16", json={})
+    resp = client.get("/api/daily-log")
+    data = resp.json()
+    assert data[0]["date"] == "2025-06-15"
+    assert data[0]["has_entries"] is True
+    assert data[1]["date"] == "2025-06-16"
     assert data[1]["has_entries"] is False
 
 
@@ -362,6 +382,192 @@ def test_update_entry_unknown_panel_id_409_without_sql_leak(client: TestClient) 
     _assert_no_sql_leak(resp.json()["detail"])
 
 
+def test_composite_put_unknown_product_id_409_without_sql_leak(client: TestClient) -> None:
+    """T-05: a supplement_entries[].product_id no library product has must map
+    to a clean 409, not an unhandled 500 whose traceback logs bound parameters
+    (supplement name/dose = health data, T-16-adjacent)."""
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"supplement_entries": [{"name": "Ghost", "product_id": 9999}]},
+    )
+    assert resp.status_code == 409
+    _assert_no_sql_leak(resp.json()["detail"])
+    # Nothing persisted — the day was never created.
+    assert client.get("/api/daily-log/2025-06-15").status_code == 404
+
+
+def test_composite_put_fk_failure_preserves_existing_day(client: TestClient) -> None:
+    """Empirical rollback check: save_daily_log DELETES the old log before the
+    re-insert, so a mid-save FK failure could lose the day if the delete were
+    committed separately. Delete + insert run in one transaction, so the 409's
+    rollback must restore the pre-existing day byte-for-byte."""
+    ok = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "original day",
+            "caffeine_entries": [{"amount_mg": 95, "source": "drip_coffee"}],
+            "section_absences": ["sauna"],
+        },
+    )
+    assert ok.status_code == 200, ok.text
+
+    bad = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "should never land",
+            "supplement_entries": [{"name": "Ghost", "product_id": 9999}],
+        },
+    )
+    assert bad.status_code == 409
+
+    after = client.get("/api/daily-log/2025-06-15")
+    assert after.status_code == 200
+    body = after.json()
+    assert body["notes"] == "original day"
+    assert len(body["caffeine_entries"]) == 1
+    assert body["caffeine_entries"][0]["amount_mg"] == 95
+    assert body["section_absences"] == ["sauna"]
+    assert body["supplement_entries"] == []
+
+
+# --- section_absences item bounds (schema, #161 Lane 3a review) ---
+
+
+def test_put_absence_key_too_long_422(client: TestClient) -> None:
+    """Keys are bounded to the section_key column (String(150))."""
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": ["k" * 151]},
+    )
+    assert resp.status_code == 422
+
+
+def test_put_absence_key_at_column_limit_ok(client: TestClient) -> None:
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": ["k" * 150]},
+    )
+    assert resp.status_code == 200
+
+
+def test_put_empty_absence_key_422(client: TestClient) -> None:
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [""]},
+    )
+    assert resp.status_code == 422
+
+
+# --- supplement:* absence keys must resolve to a library product (#161 r3) ---
+
+
+def _create_product(client: TestClient, name: str = "Melatonin") -> int:
+    resp = client.post("/api/supplement-products", json={"name": name})
+    assert resp.status_code == 201, resp.text
+    pid: int = resp.json()["id"]
+    return pid
+
+
+def test_put_unknown_supplement_absence_key_422_nothing_persisted(client: TestClient) -> None:
+    """`supplement:9999` (no such product) would make the stats engine
+    manufacture an unlabeled ghost predictor (supplement_dose_9999) — it must
+    422 at save with a static detail (T-05: the key is user text, not echoed)
+    and persist nothing."""
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": ["supplement:9999"]},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "section_absences contains a supplement key referencing an unknown product"
+    )
+    assert "9999" not in resp.text
+    # Nothing persisted — the day was never created.
+    assert client.get("/api/daily-log/2025-06-15").status_code == 404
+
+
+def test_put_malformed_supplement_absence_key_422(client: TestClient) -> None:
+    """Non-canonical suffixes are junk (or would evade the exact-string
+    reference guards, e.g. leading zeros) — all 422."""
+    pid = _create_product(client)
+    for bad in ("supplement:abc", "supplement:", f"supplement:+{pid}", f"supplement:00{pid}"):
+        resp = client.put(
+            "/api/daily-log/2025-06-15",
+            json={"section_absences": [bad]},
+        )
+        assert resp.status_code == 422, f"{bad}: {resp.status_code} {resp.text}"
+    assert client.get("/api/daily-log/2025-06-15").status_code == 404
+
+
+def test_put_unknown_supplement_absence_key_preserves_existing_day(client: TestClient) -> None:
+    """Same single-transaction guarantee as the FK-failure path: the 422's
+    rollback must restore a pre-existing day intact."""
+    ok = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "original day",
+            "caffeine_entries": [{"amount_mg": 95, "source": "drip_coffee"}],
+            "section_absences": ["sauna"],
+        },
+    )
+    assert ok.status_code == 200, ok.text
+
+    bad = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "should never land",
+            "section_absences": ["supplement:9999"],
+        },
+    )
+    assert bad.status_code == 422
+
+    after = client.get("/api/daily-log/2025-06-15")
+    assert after.status_code == 200
+    body = after.json()
+    assert body["notes"] == "original day"
+    assert len(body["caffeine_entries"]) == 1
+    assert body["section_absences"] == ["sauna"]
+
+
+def test_put_valid_supplement_absence_ok_and_aggregates_zero(
+    client: TestClient, db: Session
+) -> None:
+    """A supplement:<real id> key saves fine and reaches the analysis layer as
+    an explicit 0.0 dose (none today) for that product."""
+    pid = _create_product(client)
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [f"supplement:{pid}"]},
+    )
+    assert resp.status_code == 200, resp.text
+    day = client.get("/api/daily-log/2025-06-15")
+    assert day.json()["section_absences"] == [f"supplement:{pid}"]
+
+    # The dataframe needs a SleepRecord row for the date to emit the day.
+    db.add(SleepRecord(date=dt.date(2025, 6, 15), sleep_score=80))
+    db.commit()
+    df = prepare_analysis_dataframe(db)
+    assert df.loc[dt.date(2025, 6, 15)][f"supplement_dose_{pid}"] == 0.0
+
+
+def test_copy_day_with_valid_supplement_absence(client: TestClient) -> None:
+    """copy_day clones supplement absences (validated at save; the delete guard
+    keeps the product alive) — the copy must succeed and carry the key."""
+    pid = _create_product(client)
+    ok = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [f"supplement:{pid}", "sauna"]},
+    )
+    assert ok.status_code == 200, ok.text
+
+    resp = client.post(
+        "/api/daily-log/2025-06-16/copy-from/2025-06-15",
+        headers=JSON_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    assert sorted(resp.json()["section_absences"]) == sorted([f"supplement:{pid}", "sauna"])
+
+
 def test_redlight_dose_inverse_square_by_distance(client: TestClient) -> None:
     """#60: session dose scales (reference/actual)^2 with distance."""
     panel_id = client.post(
@@ -428,3 +634,33 @@ def test_redlight_distance_upper_bound_rejected(client: TestClient) -> None:
         },
     )
     assert r.status_code == 422
+
+
+def test_supplement_entry_rejects_negative_and_non_finite_dose(client: TestClient) -> None:
+    """Round-3 delta (Codex P2): a negative or infinite dose_mg on a
+    product-linked entry would corrupt the per-product predictor sums.
+    ge=0 + finite at the schema boundary; 0 stays legal (none-today)."""
+    day = "2025-06-15"
+    for bad_dose in ("-1", "1e309"):  # raw JSON text; 1e309 -> +inf server-side
+        resp = client.put(
+            f"/api/daily-log/{day}",
+            content='{"supplement_entries": [{"name": "Melatonin", "dose_mg": ' + bad_dose + "}]}",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, bad_dose
+    # zero-dose is the legal none-today form
+    ok = client.put(
+        f"/api/daily-log/{day}",
+        json={"supplement_entries": [{"name": "Melatonin", "dose_mg": 0}]},
+    )
+    assert ok.status_code == 200
+
+
+def test_supplement_entry_product_id_bounded_to_sqlite_int(client: TestClient) -> None:
+    """product_id >= 2**63 overflowed the SQLite bind into an uncaught 500
+    (Codex hardening note); now 422 at the schema boundary."""
+    resp = client.put(
+        "/api/daily-log/2025-06-16",
+        json={"supplement_entries": [{"name": "X", "product_id": 2**63}]},
+    )
+    assert resp.status_code == 422

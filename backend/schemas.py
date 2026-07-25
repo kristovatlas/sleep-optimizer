@@ -5,8 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import zoneinfo
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from backend.models import (
     CaffeineSensitivity,
@@ -99,7 +100,15 @@ class MealEntryOut(BaseModel):
 class SupplementEntryCreate(BaseModel):
     time: dt.time | None = None
     name: str = Field(max_length=100)
-    dose_mg: float | None = None
+    # ge=0 + finite: a negative or infinite dose would silently corrupt the
+    # per-product predictor sums (Codex P2, Lane 3a round 3); 0 stays legal
+    # (dose-as-state: 0 == "none today" in the UI contract).
+    dose_mg: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # #161 Lane 3a: optional link to a library product. NULL = legacy free-text
+    # entry (un-analyzed). The value is in the product's unit (see the model).
+    # Bounded to SQLite's signed-int range (an id >= 2**63 overflows the bind
+    # into an uncaught 500 — Codex hardening note).
+    product_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
 
 
 class SupplementEntryOut(BaseModel):
@@ -108,6 +117,60 @@ class SupplementEntryOut(BaseModel):
     time: dt.time | None = None
     name: str
     dose_mg: float | None = None
+    product_id: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
+# --- Supplement Product (library, #161 Lane 3a) ---
+
+
+class SupplementProductCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    brand: str | None = Field(default=None, max_length=100)
+    form: str | None = Field(default=None, max_length=50)
+    default_dose: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    unit: str = Field(default="mg", min_length=1, max_length=10)
+    step: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+    is_sticky: bool = False
+
+
+class SupplementProductUpdate(BaseModel):
+    """Partial update — only supplied fields change (PATCH semantics)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    brand: str | None = Field(default=None, max_length=100)
+    form: str | None = Field(default=None, max_length=50)
+    default_dose: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    unit: str | None = Field(default=None, min_length=1, max_length=10)
+    step: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    is_sticky: bool | None = None
+
+    # On the DB model name/unit/step/is_sticky are NOT NULL, but PATCH-optional
+    # fields are typed `X | None`, so an explicit `{"name": null}` would pass
+    # validation, survive exclude_unset, and only fail at commit (a 500).
+    # Reject explicit None for those fields here (422 at the boundary) while
+    # keeping None-clearing for the nullable brand/form/default_dose. Do NOT
+    # switch the router to exclude_none — that would break clearing.
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_for_non_nullable(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for field in ("name", "unit", "step", "is_sticky"):
+                if field in data and data[field] is None:
+                    raise ValueError(f"{field} cannot be null")
+        return data
+
+
+class SupplementProductOut(BaseModel):
+    id: int
+    name: str
+    brand: str | None = None
+    form: str | None = None
+    default_dose: float | None = None
+    unit: str
+    step: float
+    is_sticky: bool
 
     model_config = {"from_attributes": True}
 
@@ -310,6 +373,12 @@ class DailyLogCreate(BaseModel):
     sunlight_entries: list[SunlightEntryCreate] = []
     red_light_entries: list[RedLightEntryCreate] = []
     nsdr_entries: list[NSDREntryCreate] = []
+    # #161 Lane 3a: explicit "did not do X" section keys for the day (e.g.
+    # "caffeine", "sauna", "supplement:<product_id>"). A save replaces the day's
+    # absences with this list (same lifecycle as sub-entries). See ADR 003.
+    # Items are bounded to the section_key column (String(150)); an oversized
+    # or empty key 422s at the boundary instead of hitting the DB.
+    section_absences: list[Annotated[str, StringConstraints(min_length=1, max_length=150)]] = []
 
 
 class DailyLogOut(BaseModel):
@@ -328,8 +397,19 @@ class DailyLogOut(BaseModel):
     sunlight_entries: list[SunlightEntryOut] = []
     red_light_entries: list[RedLightEntryOut] = []
     nsdr_entries: list[NSDREntryOut] = []
+    # Serialized as the bare section_key strings — the before-validator maps the
+    # ORM SectionAbsence rows (from model_validate) down to their keys.
+    section_absences: list[str] = []
 
     model_config = {"from_attributes": True}
+
+    @field_validator("section_absences", mode="before")
+    @classmethod
+    def _absence_keys(cls, value: object) -> list[str]:
+        """Accept ORM SectionAbsence rows or plain strings, emit key strings."""
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [item if isinstance(item, str) else item.section_key for item in value]
 
 
 # --- User Settings ---
@@ -364,6 +444,10 @@ class ExportData(BaseModel):
 
     daily_logs: list[DailyLogOut] = []
     sleep_records: list[SleepRecordOut] = []
+    # #161 Lane 3a: the supplement library, so an export carries product
+    # identity (name/brand/form/dose unit) that logged entries reference by
+    # product_id — otherwise a re-import would lose which product each entry is.
+    supplement_products: list[SupplementProductOut] = []
 
 
 # --- User Settings ---
