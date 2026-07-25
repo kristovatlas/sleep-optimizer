@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDateNavigation } from "../../hooks/useDateNavigation";
 import { useDailyLog, outToCreate } from "../../hooks/useDailyLog";
 import { useCaffeineDecay } from "../../hooks/useCaffeineDecay";
 import { getSettings } from "../../api/settings";
+import { getDailyLog } from "../../api/dailyLog";
 import {
   listSupplementProducts,
   createSupplementProduct,
 } from "../../api/supplements";
+import { addDays } from "../../utils/date";
+import { ApiError } from "../../types/api";
 import type {
   UserSettingsOut,
   DailyLogCreate,
@@ -60,6 +63,7 @@ export function DailyLogPage() {
     saving,
     saveStatus,
     saveError,
+    exists,
     save,
   } = useDailyLog(currentDate);
   const [settings, setSettings] = useState<UserSettingsOut | null>(null);
@@ -84,6 +88,41 @@ export function DailyLogPage() {
       .then((p) => setProducts(Array.isArray(p) ? p : null))
       .catch(() => {});
   }, []);
+
+  // #161 sticky products: on a not-yet-saved log for TODAY, sticky library
+  // products auto-appear as prefilled rows (default dose, no time). Being
+  // listed = took@default (owner decision, v3); the user types 0 for a skip
+  // or removes the row if unsure. Scoped to today only — auto-filling a
+  // blank PAST day the user merely browses would fabricate history.
+  const stickyAppliedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (loading || exists || loadError || !isToday || products === null) return;
+    if (stickyAppliedFor.current === currentDate) return;
+    stickyAppliedFor.current = currentDate;
+    const sticky = products.filter((p) => p.is_sticky);
+    if (sticky.length === 0) return;
+    setFormData((prevData) => {
+      const present = new Set(
+        prevData.supplement_entries
+          .map((e) => e.product_id)
+          .filter((id): id is number => id != null),
+      );
+      const rows = sticky
+        .filter((p) => !present.has(p.id))
+        .map((p) => ({
+          time: null,
+          name: p.name,
+          dose_mg: p.default_dose ?? null,
+          product_id: p.id,
+        }));
+      return rows.length === 0
+        ? prevData
+        : {
+            ...prevData,
+            supplement_entries: [...prevData.supplement_entries, ...rows],
+          };
+    });
+  }, [loading, exists, loadError, isToday, products, currentDate, setFormData]);
 
   const bedtimeHour = settings?.typical_bedtime
     ? Number(settings.typical_bedtime.split(":")[0]) +
@@ -159,6 +198,45 @@ export function DailyLogPage() {
 
   const handleCopied = (log: DailyLogOut) => {
     setFormData(outToCreate(log));
+  };
+
+  /** #110: pull yesterday's supplement rows (products, doses, times) into
+   * today's unsaved state. Rows for a product already listed are updated in
+   * place; the rest are appended. Resolves the number of source entries. */
+  const copyYesterdaySupplements = async (): Promise<number> => {
+    let out: DailyLogOut;
+    try {
+      out = await getDailyLog(addDays(currentDate, -1));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return 0;
+      throw e;
+    }
+    const rows = out.supplement_entries.map(
+      ({ time, name, dose_mg, product_id }) => ({
+        time,
+        name,
+        dose_mg,
+        product_id,
+      }),
+    );
+    if (rows.length === 0) return 0;
+    setFormData((prev) => {
+      const next = [...prev.supplement_entries];
+      for (const row of rows) {
+        const idx = next.findIndex((e) =>
+          row.product_id != null
+            ? e.product_id === row.product_id
+            : e.product_id == null && e.name === row.name,
+        );
+        if (idx >= 0) {
+          next[idx] = { ...next[idx], dose_mg: row.dose_mg, time: row.time };
+        } else {
+          next.push(row);
+        }
+      }
+      return { ...prev, supplement_entries: next };
+    });
+    return rows.length;
   };
 
   const handleCreateProduct = async (
@@ -274,6 +352,7 @@ export function DailyLogPage() {
             onChange={(v) => update("supplement_entries", v)}
             products={products}
             onCreateProduct={handleCreateProduct}
+            onCopyYesterday={copyYesterdaySupplements}
           />
         )}
 

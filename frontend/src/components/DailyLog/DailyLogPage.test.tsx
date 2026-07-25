@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { DailyLogPage } from "./DailyLogPage";
+import { addDays, todayStr } from "../../utils/date";
 
 const mockLogOut = {
   date: "2024-06-15",
@@ -451,5 +452,139 @@ describe("DailyLogPage", () => {
     await waitFor(() => {
       expect(lastPutBody().section_absences).toEqual(["sauna", "alcohol"]);
     });
+  });
+
+  // --- #161: supplement library integration ---
+
+  const stickyProduct = {
+    id: 5,
+    name: "Melatonin",
+    brand: "NOW",
+    form: null,
+    default_dose: 3,
+    unit: "mg",
+    step: 0.5,
+    is_sticky: true,
+  };
+
+  it("sticky products auto-populate a not-yet-saved TODAY at the default dose", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const today = todayStr();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes("/api/daily-log/") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            data: { ...mockLogOut, date: today, ...body },
+            warnings: [],
+          }),
+        );
+      }
+      // No log exists yet for the day
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage(today);
+
+    const dose = await screen.findByRole("spinbutton", {
+      name: "Melatonin dose (mg)",
+    });
+    expect(dose).toHaveValue(3);
+
+    // Being listed = took@default: the row rides the save payload
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().supplement_entries).toEqual([
+        { time: null, name: "Melatonin", dose_mg: 3, product_id: 5 },
+      ]);
+    });
+  });
+
+  it("sticky products do NOT populate a blank past day", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    renderPage("2024-06-15");
+
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("copy-yesterday pulls yesterday's supplement rows into the form", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes(`/api/daily-log/${yesterday}`)) {
+        return new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: yesterday,
+            supplement_entries: [
+              {
+                id: 11,
+                date: yesterday,
+                time: "21:30:00",
+                name: "Melatonin",
+                dose_mg: 2.5,
+                product_id: 5,
+              },
+            ],
+          }),
+        );
+      }
+      if (urlStr.includes("/api/daily-log/2024-06-15")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(2.5);
+    expect(screen.getByLabelText("Melatonin time")).toHaveDisplayValue("21:30");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Copied 1 supplement from yesterday",
+    );
   });
 });

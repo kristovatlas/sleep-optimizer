@@ -41,12 +41,14 @@ interface HarnessProps {
   onCreateProduct?: (
     data: SupplementProductCreate,
   ) => Promise<SupplementProduct>;
+  onCopyYesterday?: () => Promise<number>;
 }
 
 function Harness({
   initial = [],
   products = [melatonin, magnesium],
   onCreateProduct = vi.fn(),
+  onCopyYesterday = vi.fn(async () => 0),
 }: HarnessProps) {
   const [entries, setEntries] = useState(initial);
   return (
@@ -55,6 +57,7 @@ function Harness({
       onChange={setEntries}
       products={products}
       onCreateProduct={onCreateProduct}
+      onCopyYesterday={onCopyYesterday}
     />
   );
 }
@@ -226,6 +229,31 @@ describe("SupplementSection", () => {
     expect(
       screen.queryByRole("spinbutton", { name: "Apigenin dose (mg)" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("copy-yesterday chip reports what it pulled", async () => {
+    const user = userEvent.setup();
+    const onCopyYesterday = vi.fn(async () => 2);
+    render(<Harness onCopyYesterday={onCopyYesterday} />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Copied 2 supplements from yesterday",
+    );
+    expect(onCopyYesterday).toHaveBeenCalledOnce();
+  });
+
+  it("copy-yesterday with nothing logged says so", async () => {
+    const user = userEvent.setup();
+    render(<Harness onCopyYesterday={vi.fn(async () => 0)} />);
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "No supplements logged yesterday",
+    );
   });
 
   it("Mark all none today zeroes every listed row", async () => {

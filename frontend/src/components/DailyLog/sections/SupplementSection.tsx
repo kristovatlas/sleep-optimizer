@@ -34,6 +34,9 @@ interface SupplementSectionProps {
   onCreateProduct: (
     data: SupplementProductCreate,
   ) => Promise<SupplementProduct>;
+  /** Pulls yesterday's supplement rows into today's unsaved state (#110);
+   * resolves the number of entries pulled (0 = nothing logged yesterday). */
+  onCopyYesterday: () => Promise<number>;
 }
 
 const UNITS = ["mg", "mcg", "IU", "g"];
@@ -63,6 +66,7 @@ export function SupplementSection({
   onChange,
   products,
   onCreateProduct,
+  onCopyYesterday,
 }: SupplementSectionProps) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [filter, setFilter] = useState("");
@@ -78,6 +82,7 @@ export function SupplementSection({
   });
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [copyMsg, setCopyMsg] = useState<string | null>(null);
 
   const byId = useMemo(
     () => new Map((products ?? []).map((p) => [p.id, p])),
@@ -94,6 +99,20 @@ export function SupplementSection({
     setPickerOpen(false);
     setFilter("");
     setShowCreate(false);
+  };
+
+  const handleCopyYesterday = async () => {
+    setCopyMsg(null);
+    try {
+      const n = await onCopyYesterday();
+      setCopyMsg(
+        n > 0
+          ? `Copied ${n} supplement${n === 1 ? "" : "s"} from yesterday`
+          : "No supplements logged yesterday",
+      );
+    } catch {
+      setCopyMsg("Couldn't load yesterday's log");
+    }
   };
 
   const handleCreate = async () => {
@@ -272,8 +291,16 @@ export function SupplementSection({
       count={entries.length}
       storageKey="supplements"
     >
-      {entries.some((e) => e.dose_mg !== 0) && (
-        <div className="supp-actions">
+      <div className="supp-actions">
+        <button
+          type="button"
+          className="supp-chip"
+          aria-label="Copy yesterday's supplements"
+          onClick={() => void handleCopyYesterday()}
+        >
+          ⟲ Copy yesterday
+        </button>
+        {entries.some((e) => e.dose_mg !== 0) && (
           <button
             type="button"
             className="supp-chip"
@@ -281,7 +308,12 @@ export function SupplementSection({
           >
             Mark all none today
           </button>
-        </div>
+        )}
+      </div>
+      {copyMsg && (
+        <p className="supp-msg" role="status">
+          {copyMsg}
+        </p>
       )}
 
       {entries.map(renderRow)}
