@@ -398,3 +398,10 @@ def test_has_entries_with_sexual_activity(db: Session) -> None:
         ),
     )
     assert has_entries(log) is True
+
+
+def test_has_entries_absence_only_day(db: Session) -> None:
+    """An explicit 'none today' record is recorded data (ADR 003 amendment):
+    a day holding only a SectionAbsence counts as a day with entries."""
+    log = save_daily_log(db, D1, DailyLogCreate(section_absences=["caffeine"]))
+    assert has_entries(log) is True

@@ -5,11 +5,14 @@ default dose/unit/step, plus a sticky flag) that a logged ``SupplementEntry``
 links to by ``product_id``. Each product is its own analysis predictor (Lane 2),
 so the library is the schema those predictors key off.
 
-Delete policy: a product referenced by any logged entry cannot be hard-deleted
-(that would orphan historical entries and silently drop a predictor). Such a
-delete returns 409; only an unreferenced product deletes. This is the simplest
-safe rule with no extra schema — no ``is_retired`` column/migration — and it
-never corrupts history.
+Delete policy: a product referenced by any logged entry — or by any explicit
+"none today" absence record (``SectionAbsence`` with
+``section_key == "supplement:<id>"``) — cannot be hard-deleted (that would
+orphan historical data and silently drop a predictor; a product tracked only
+via absence days is still recorded data per ADR 003). Such a delete returns
+409; only an unreferenced product deletes. This is the simplest safe rule with
+no extra schema — no ``is_retired`` column/migration — and it never corrupts
+history.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
-from backend.models import SupplementEntry, SupplementProduct
+from backend.models import SectionAbsence, SupplementEntry, SupplementProduct
 from backend.schemas import (
     SupplementProductCreate,
     SupplementProductOut,
@@ -77,22 +80,36 @@ def update_product(
 
 @router.delete("/{product_id}", status_code=204)
 def delete_product(product_id: int, db: Session = Depends(get_db)) -> None:
-    """Delete a product — only if no logged entry references it, else 409.
+    """Delete a product — only if nothing recorded references it, else 409.
 
     A referenced product must not be hard-deleted (it would orphan historical
-    entries and drop a predictor); the caller keeps it in the library instead.
+    data and drop a predictor); the caller keeps it in the library instead.
+    References are logged entries AND explicit "none today" absence records
+    (``SectionAbsence`` rows keyed ``supplement:<id>``) — a product tracked
+    only via absence days is still recorded data (ADR 003).
     """
     product = db.get(SupplementProduct, product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Supplement product not found")
-    referenced = (
+    referenced_by_entry = (
         db.query(SupplementEntry).filter(SupplementEntry.product_id == product_id).first()
         is not None
     )
-    if referenced:
+    if referenced_by_entry:
         raise HTTPException(
             status_code=409,
             detail="Product is referenced by logged entries and cannot be deleted",
+        )
+    referenced_by_absence = (
+        db.query(SectionAbsence)
+        .filter(SectionAbsence.section_key == f"supplement:{product_id}")
+        .first()
+        is not None
+    )
+    if referenced_by_absence:
+        raise HTTPException(
+            status_code=409,
+            detail='Product is referenced by "none today" absence records and cannot be deleted',
         )
     db.delete(product)
     db.commit()

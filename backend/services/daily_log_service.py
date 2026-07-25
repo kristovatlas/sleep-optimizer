@@ -259,7 +259,11 @@ def _create_sub_entries(db: Session, date: dt.date, data: DailyLogCreate) -> Non
 
 
 def has_entries(log: DailyLog) -> bool:
-    """Check if a daily log has any sub-entries."""
+    """Check if a daily log has any sub-entries or explicit absence records.
+
+    Section absences count: an explicit "none today" is recorded data (ADR 003
+    amendment), so an absence-only day is a day with data in list/summary views.
+    """
     for _entry_type, (_model_cls, _schema_cls, rel_name) in ENTRY_TYPE_MAP.items():
         entries = getattr(log, rel_name)
         if entries is None:
@@ -268,4 +272,4 @@ def has_entries(log: DailyLog) -> bool:
             return True
         if not isinstance(entries, list) and entries is not None:
             return True
-    return False
+    return len(log.section_absences) > 0

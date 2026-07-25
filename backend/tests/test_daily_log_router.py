@@ -168,6 +168,20 @@ def test_list_logs_has_entries_flag(client: TestClient) -> None:
     assert data[1]["has_entries"] is False
 
 
+def test_list_logs_has_entries_counts_absence_only_day(client: TestClient) -> None:
+    """A day with only a 'none today' absence record has recorded data (ADR 003
+    amendment) — the summary must report has_entries=True; a truly blank day
+    stays False."""
+    client.put("/api/daily-log/2025-06-15", json={"section_absences": ["caffeine"]})
+    client.put("/api/daily-log/2025-06-16", json={})
+    resp = client.get("/api/daily-log")
+    data = resp.json()
+    assert data[0]["date"] == "2025-06-15"
+    assert data[0]["has_entries"] is True
+    assert data[1]["date"] == "2025-06-16"
+    assert data[1]["has_entries"] is False
+
+
 # --- Copy day ---
 
 

@@ -164,3 +164,23 @@ def test_delete_referenced_product_conflicts(client: TestClient) -> None:
     assert del_resp.status_code == 409
     # Still present.
     assert client.get(f"/api/supplement-products/{pid}").status_code == 200
+
+
+def test_delete_absence_only_referenced_product_conflicts(client: TestClient) -> None:
+    """A product tracked ONLY via 'none today' absence records (zero entries)
+    is still recorded data — deleting it would orphan the absences and destroy
+    the predictor's identity, so it must 409 and the absence rows stay intact."""
+    pid = _create(client, name="Melatonin")["id"]
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [f"supplement:{pid}"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+    del_resp = client.delete(f"/api/supplement-products/{pid}")
+    assert del_resp.status_code == 409
+    # Product still present; the absence record untouched.
+    assert client.get(f"/api/supplement-products/{pid}").status_code == 200
+    day = client.get("/api/daily-log/2025-06-15")
+    assert day.status_code == 200
+    assert day.json()["section_absences"] == [f"supplement:{pid}"]
