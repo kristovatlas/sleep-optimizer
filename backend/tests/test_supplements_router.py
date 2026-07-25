@@ -55,13 +55,16 @@ def test_create_product_rejects_blank_name(client: TestClient) -> None:
 # --- list ---
 
 
-def test_list_products_ordered_by_name(client: TestClient) -> None:
+def test_list_products_ordered_by_name_case_insensitive(client: TestClient) -> None:
+    # Binary collation would sort "Zinc" before "ashwagandha"; the list route
+    # orders by lower(name) so casing doesn't scramble the library.
     _create(client, name="Zinc")
-    _create(client, name="Ashwagandha")
+    _create(client, name="ashwagandha")
+    _create(client, name="Melatonin")
     resp = client.get("/api/supplement-products")
     assert resp.status_code == 200
     names = [p["name"] for p in resp.json()]
-    assert names == ["Ashwagandha", "Zinc"]
+    assert names == ["ashwagandha", "Melatonin", "Zinc"]
 
 
 def test_list_products_empty(client: TestClient) -> None:
@@ -105,6 +108,31 @@ def test_update_product_rejects_blank_name(client: TestClient) -> None:
     pid = _create(client)["id"]
     resp = client.patch(f"/api/supplement-products/{pid}", json={"name": ""})
     assert resp.status_code == 422
+
+
+def test_update_product_rejects_explicit_null_on_non_nullable(client: TestClient) -> None:
+    """`{"name": null}` used to pass validation (PATCH fields are `X | None`),
+    survive exclude_unset, and blow up as a NOT NULL 500 at commit — it must
+    422 at the boundary instead. Same for unit/step/is_sticky."""
+    pid = _create(client)["id"]
+    for field in ("name", "unit", "step", "is_sticky"):
+        resp = client.patch(f"/api/supplement-products/{pid}", json={field: None})
+        assert resp.status_code == 422, f"{field}: {resp.status_code} {resp.text}"
+
+
+def test_update_product_null_clears_nullable_fields(client: TestClient) -> None:
+    """Explicit null must still clear the genuinely nullable fields."""
+    pid = _create(client, brand="Pure Encapsulations", form="capsule", default_dose=200)["id"]
+    resp = client.patch(
+        f"/api/supplement-products/{pid}",
+        json={"brand": None, "form": None, "default_dose": None},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["brand"] is None
+    assert body["form"] is None
+    assert body["default_dose"] is None
+    assert body["name"] == "Magnesium Glycinate"  # untouched
 
 
 # --- delete (unreferenced allowed; referenced -> 409) ---

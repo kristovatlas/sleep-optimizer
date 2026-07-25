@@ -116,6 +116,11 @@ management are Lane 3.
   "None today" affordance per section + per-supplement "didn't take it", the
   library pick UI (inline + settings + onboarding seed), #110 quick-add /
   common-dose chips. Consumes the 3a write-path + library API.
+  **Contract (agreed, 3a review):** the daily-log PUT has REPLACE semantics for
+  `section_absences` exactly like every sub-entry list — the 3b client MUST
+  round-trip `section_absences` from GET into every PUT, or a save wipes the
+  day's absences. Between 3a and 3b the shipped UI doesn't create absences so
+  nothing user-visible is at risk, but 3b's first save-path test must cover it.
 
 **UX mockup → owner sign-off before build (3b).**
 

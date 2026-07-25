@@ -15,6 +15,7 @@ never corrupts history.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.database import get_db
@@ -31,7 +32,7 @@ router = APIRouter(prefix="/api/supplement-products", tags=["supplements"])
 @router.get("", response_model=list[SupplementProductOut])
 def list_products(db: Session = Depends(get_db)) -> list[SupplementProductOut]:
     """List all supplement library products."""
-    products = db.query(SupplementProduct).order_by(SupplementProduct.name).all()
+    products = db.query(SupplementProduct).order_by(func.lower(SupplementProduct.name)).all()
     return [SupplementProductOut.model_validate(p) for p in products]
 
 

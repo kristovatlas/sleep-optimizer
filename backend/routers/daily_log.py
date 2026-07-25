@@ -72,7 +72,21 @@ def upsert_daily_log(
 ) -> DailyLogResponse:
     """Create or replace a daily log with all sub-entries."""
     warnings = validate_daily_log(data)
-    log = save_daily_log(db, date, data)
+    # T-05: a client body can reach an IntegrityError here (e.g. a
+    # supplement_entries[].product_id that no library product has, rejected by
+    # the FK). Never echo str(exc) — that leaks SQL text and bound parameters
+    # (supplement names/doses are health data, T-16-adjacent) — map it to a
+    # clean 409 like the sub-entry routes. save_daily_log's delete-old-log +
+    # re-insert run in ONE transaction (no intermediate commit), so the
+    # rollback restores any pre-existing day intact.
+    try:
+        log = save_daily_log(db, date, data)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Payload references a related record that does not exist",
+        ) from exc
     out = DailyLogOut.model_validate(log)
     return DailyLogResponse(data=out, warnings=warnings)
 

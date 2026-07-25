@@ -5,8 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import zoneinfo
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from backend.models import (
     CaffeineSensitivity,
@@ -139,6 +140,21 @@ class SupplementProductUpdate(BaseModel):
     unit: str | None = Field(default=None, min_length=1, max_length=10)
     step: float | None = Field(default=None, gt=0)
     is_sticky: bool | None = None
+
+    # On the DB model name/unit/step/is_sticky are NOT NULL, but PATCH-optional
+    # fields are typed `X | None`, so an explicit `{"name": null}` would pass
+    # validation, survive exclude_unset, and only fail at commit (a 500).
+    # Reject explicit None for those fields here (422 at the boundary) while
+    # keeping None-clearing for the nullable brand/form/default_dose. Do NOT
+    # switch the router to exclude_none — that would break clearing.
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_for_non_nullable(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for field in ("name", "unit", "step", "is_sticky"):
+                if field in data and data[field] is None:
+                    raise ValueError(f"{field} cannot be null")
+        return data
 
 
 class SupplementProductOut(BaseModel):
@@ -355,7 +371,9 @@ class DailyLogCreate(BaseModel):
     # #161 Lane 3a: explicit "did not do X" section keys for the day (e.g.
     # "caffeine", "sauna", "supplement:<product_id>"). A save replaces the day's
     # absences with this list (same lifecycle as sub-entries). See ADR 003.
-    section_absences: list[str] = []
+    # Items are bounded to the section_key column (String(150)); an oversized
+    # or empty key 422s at the boundary instead of hitting the DB.
+    section_absences: list[Annotated[str, StringConstraints(min_length=1, max_length=150)]] = []
 
 
 class DailyLogOut(BaseModel):

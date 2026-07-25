@@ -362,6 +362,82 @@ def test_update_entry_unknown_panel_id_409_without_sql_leak(client: TestClient) 
     _assert_no_sql_leak(resp.json()["detail"])
 
 
+def test_composite_put_unknown_product_id_409_without_sql_leak(client: TestClient) -> None:
+    """T-05: a supplement_entries[].product_id no library product has must map
+    to a clean 409, not an unhandled 500 whose traceback logs bound parameters
+    (supplement name/dose = health data, T-16-adjacent)."""
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"supplement_entries": [{"name": "Ghost", "product_id": 9999}]},
+    )
+    assert resp.status_code == 409
+    _assert_no_sql_leak(resp.json()["detail"])
+    # Nothing persisted — the day was never created.
+    assert client.get("/api/daily-log/2025-06-15").status_code == 404
+
+
+def test_composite_put_fk_failure_preserves_existing_day(client: TestClient) -> None:
+    """Empirical rollback check: save_daily_log DELETES the old log before the
+    re-insert, so a mid-save FK failure could lose the day if the delete were
+    committed separately. Delete + insert run in one transaction, so the 409's
+    rollback must restore the pre-existing day byte-for-byte."""
+    ok = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "original day",
+            "caffeine_entries": [{"amount_mg": 95, "source": "drip_coffee"}],
+            "section_absences": ["sauna"],
+        },
+    )
+    assert ok.status_code == 200, ok.text
+
+    bad = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "should never land",
+            "supplement_entries": [{"name": "Ghost", "product_id": 9999}],
+        },
+    )
+    assert bad.status_code == 409
+
+    after = client.get("/api/daily-log/2025-06-15")
+    assert after.status_code == 200
+    body = after.json()
+    assert body["notes"] == "original day"
+    assert len(body["caffeine_entries"]) == 1
+    assert body["caffeine_entries"][0]["amount_mg"] == 95
+    assert body["section_absences"] == ["sauna"]
+    assert body["supplement_entries"] == []
+
+
+# --- section_absences item bounds (schema, #161 Lane 3a review) ---
+
+
+def test_put_absence_key_too_long_422(client: TestClient) -> None:
+    """Keys are bounded to the section_key column (String(150))."""
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": ["k" * 151]},
+    )
+    assert resp.status_code == 422
+
+
+def test_put_absence_key_at_column_limit_ok(client: TestClient) -> None:
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": ["k" * 150]},
+    )
+    assert resp.status_code == 200
+
+
+def test_put_empty_absence_key_422(client: TestClient) -> None:
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [""]},
+    )
+    assert resp.status_code == 422
+
+
 def test_redlight_dose_inverse_square_by_distance(client: TestClient) -> None:
     """#60: session dose scales (reference/actual)^2 with distance."""
     panel_id = client.post(
