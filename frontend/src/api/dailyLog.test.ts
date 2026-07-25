@@ -43,6 +43,7 @@ describe("dailyLog API", () => {
       sunlight_entries: [],
       red_light_entries: [],
       nsdr_entries: [],
+      section_absences: [],
     });
     expect(spy).toHaveBeenCalledWith(
       "/api/daily-log/2024-01-01",

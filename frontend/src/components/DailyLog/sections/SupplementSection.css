@@ -1,0 +1,187 @@
+/* Supplements per the v3 mock (#161 Lane 3b). Circadian palette (ADR 004):
+ * rust "none today" reuses the shared absence tokens (AbsenceToggle.css). */
+
+.supp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.supp-chip {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px dashed var(--color-border-light);
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.supp-msg {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.supp-msg--error {
+  color: var(--color-error);
+}
+
+.supp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.supp-row--none {
+  border-color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+}
+
+.supp-row--none .supp-row-name,
+.supp-row--none .supp-dose-input {
+  color: var(--color-warning);
+}
+
+.supp-row-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.supp-row-name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.supp-row-meta {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.supp-row-none-text {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-warning);
+}
+
+.supp-row-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.supp-dose {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.supp-dose-nudge {
+  width: 1.8rem;
+  padding: 2px 0;
+  font-size: 0.9rem;
+  border-radius: 6px;
+}
+
+.supp-dose-input {
+  width: 4.5rem;
+  text-align: right;
+}
+
+.supp-unit {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.supp-time {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.supp-remove {
+  background: transparent;
+  color: var(--color-error);
+  border: none;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 0.4rem;
+}
+
+.supp-add-btn {
+  background: transparent;
+  color: var(--color-text-accent);
+  border: 1px dashed var(--color-border-light);
+  font-size: 0.85rem;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.supp-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.supp-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.supp-picker-list button {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  text-align: left;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.supp-create {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.supp-create-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.supp-create-row input,
+.supp-create-row select {
+  min-width: 0;
+  flex: 1;
+}
+
+.supp-create-sticky {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}

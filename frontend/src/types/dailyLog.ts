@@ -26,7 +26,13 @@ export interface MealEntryCreate {
 export interface SupplementEntryCreate {
   time: string | null;
   name: string;
+  // Unit-agnostic dose VALUE in the linked product's unit (legacy column name;
+  // mg for free-text rows). Dose IS the state: > 0 = took it, 0 = explicit
+  // "none today", and a row absent from the list = not recorded (NULL).
   dose_mg: number | null;
+  // Link to a SupplementProduct library row; null = legacy free-text entry
+  // (kept editable but never analyzed).
+  product_id: number | null;
 }
 
 export interface HabitEntryCreate {
@@ -154,6 +160,11 @@ export interface DailyLogCreate {
   sunlight_entries: SunlightEntryCreate[];
   red_light_entries: RedLightEntryCreate[];
   nsdr_entries: NSDREntryCreate[];
+  // Explicit "did not do X" section keys (e.g. "caffeine", "sauna",
+  // "supplement:<product_id>"). ROUND-TRIP CONTRACT: the PUT has REPLACE
+  // semantics — every save must carry the day's absences (loaded keys plus
+  // local changes) or it silently wipes them on the backend. See ADR 003.
+  section_absences: string[];
 }
 
 export interface DailyLogOut {
@@ -172,6 +183,7 @@ export interface DailyLogOut {
   sunlight_entries: SunlightEntryOut[];
   red_light_entries: RedLightEntryOut[];
   nsdr_entries: NSDREntryOut[];
+  section_absences: string[];
 }
 
 export interface DailyLogResponse {

@@ -36,11 +36,18 @@ function emptyLog(): DailyLogCreate {
     sunlight_entries: [],
     red_light_entries: [],
     nsdr_entries: [],
+    section_absences: [],
   };
 }
 
-/** Strip `id` and `date` from Out entries to produce Create form state. */
-function outToCreate(out: DailyLogOut): DailyLogCreate {
+/** Strip `id` and `date` from Out entries to produce Create form state.
+ *
+ * ROUND-TRIP CONTRACT (#161 Lane 3a/3b): `section_absences` MUST be carried
+ * from every GET into the form state — the PUT replaces the day's absences
+ * with whatever the payload holds, so dropping them here would make any
+ * unrelated save silently wipe the day's explicit "none today" records.
+ */
+export function outToCreate(out: DailyLogOut): DailyLogCreate {
   return {
     is_sick: out.is_sick,
     notes: out.notes,
@@ -57,10 +64,11 @@ function outToCreate(out: DailyLogOut): DailyLogCreate {
       notes,
     })),
     supplement_entries: out.supplement_entries.map(
-      ({ time, name, dose_mg }) => ({
+      ({ time, name, dose_mg, product_id }) => ({
         time,
         name,
         dose_mg,
+        product_id,
       }),
     ),
     habit_entries: out.habit_entries.map(
@@ -122,6 +130,7 @@ function outToCreate(out: DailyLogOut): DailyLogCreate {
         nsdr_type,
       }),
     ),
+    section_absences: [...(out.section_absences ?? [])],
   };
 }
 

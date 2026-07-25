@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { Toggle } from "../../shared/Toggle";
 import type { MealEntryCreate } from "../../../types";
@@ -6,6 +7,7 @@ import type { MealEntryCreate } from "../../../types";
 interface MealSectionProps {
   entries: MealEntryCreate[];
   onChange: (entries: MealEntryCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 function nowTimeStr(): string {
@@ -13,7 +15,7 @@ function nowTimeStr(): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:00`;
 }
 
-export function MealSection({ entries, onChange }: MealSectionProps) {
+export function MealSection({ entries, onChange, absence }: MealSectionProps) {
   const addEntry = () =>
     onChange([
       ...entries,
@@ -25,7 +27,12 @@ export function MealSection({ entries, onChange }: MealSectionProps) {
     onChange(entries.map((e, i) => (i === index ? updated : e)));
 
   return (
-    <SectionWrapper title="Meals" count={entries.length} storageKey="meals">
+    <SectionWrapper
+      title="Meals"
+      count={entries.length}
+      storageKey="meals"
+      absence={absence}
+    >
       {entries.map((entry, i) => (
         <div
           key={i}

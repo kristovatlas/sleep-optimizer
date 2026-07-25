@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { NumberInput } from "../../shared/NumberInput";
 import { SelectInput } from "../../shared/SelectInput";
@@ -9,6 +10,7 @@ import "./CaffeineSection.css";
 interface CaffeineSectionProps {
   entries: CaffeineEntryCreate[];
   onChange: (entries: CaffeineEntryCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 const QUICK_ADD: { label: string; mg: number; source: CaffeineSource }[] = [
@@ -22,7 +24,11 @@ function nowTimeStr(): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:00`;
 }
 
-export function CaffeineSection({ entries, onChange }: CaffeineSectionProps) {
+export function CaffeineSection({
+  entries,
+  onChange,
+  absence,
+}: CaffeineSectionProps) {
   const totalMg = entries.reduce((sum, e) => sum + e.amount_mg, 0);
 
   const addEntry = (entry: CaffeineEntryCreate) =>
@@ -37,6 +43,7 @@ export function CaffeineSection({ entries, onChange }: CaffeineSectionProps) {
       title="Caffeine"
       count={entries.length}
       storageKey="caffeine"
+      absence={absence}
       defaultOpen
     >
       <div className="caffeine-quick-add">

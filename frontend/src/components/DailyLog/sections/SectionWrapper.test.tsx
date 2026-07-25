@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { SectionWrapper } from "./SectionWrapper";
 
 describe("SectionWrapper", () => {
@@ -71,5 +71,58 @@ describe("SectionWrapper", () => {
     );
     await user.click(screen.getByText("Caffeine"));
     expect(localStorage.getItem("somnus-section-persist-test")).toBe("true");
+  });
+
+  // --- #159/#161: explicit "none today" section state ---
+
+  it("renders the absence toggle and fires onToggle", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    render(
+      <SectionWrapper
+        title="Caffeine"
+        storageKey="test"
+        defaultOpen
+        absence={{ active: false, onToggle, subject: "caffeine" }}
+      >
+        <p>Content</p>
+      </SectionWrapper>,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Mark caffeine none today" }),
+    );
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it("active absence shows the header badge, Undo, and dims the body", () => {
+    render(
+      <SectionWrapper
+        title="Caffeine"
+        storageKey="test"
+        defaultOpen
+        absence={{ active: true, onToggle: () => {}, subject: "caffeine" }}
+      >
+        <p>Content</p>
+      </SectionWrapper>,
+    );
+    // Header badge + the toggle's own state pill
+    expect(screen.getAllByText("None today")).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "Undo — restore caffeine today" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Content").parentElement).toHaveClass(
+      "section-body--absent",
+    );
+  });
+
+  it("no absence prop renders no toggle", () => {
+    render(
+      <SectionWrapper title="Caffeine" storageKey="test" defaultOpen>
+        <p>Content</p>
+      </SectionWrapper>,
+    );
+    expect(
+      screen.queryByRole("button", { name: /none today/i }),
+    ).not.toBeInTheDocument();
   });
 });

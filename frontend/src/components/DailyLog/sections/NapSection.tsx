@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { NumberInput } from "../../shared/NumberInput";
 import type { NapEntryCreate } from "../../../types";
@@ -6,6 +7,7 @@ import type { NapEntryCreate } from "../../../types";
 interface NapSectionProps {
   entries: NapEntryCreate[];
   onChange: (entries: NapEntryCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 // Mirrors the backend NapEntryCreate constraint (schemas.py: ge=1, le=240).
@@ -116,7 +118,7 @@ function reconcile(entry: NapEntryCreate, changed: NapField): NapEntryCreate {
   return entry;
 }
 
-export function NapSection({ entries, onChange }: NapSectionProps) {
+export function NapSection({ entries, onChange, absence }: NapSectionProps) {
   const addQuickNap = (minutes: number) =>
     onChange([
       ...entries,
@@ -150,7 +152,12 @@ export function NapSection({ entries, onChange }: NapSectionProps) {
   };
 
   return (
-    <SectionWrapper title="Naps" count={entries.length} storageKey="naps">
+    <SectionWrapper
+      title="Naps"
+      count={entries.length}
+      storageKey="naps"
+      absence={absence}
+    >
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button
           type="button"

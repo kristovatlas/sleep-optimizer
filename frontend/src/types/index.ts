@@ -1,5 +1,6 @@
 export * from "./enums";
 export * from "./dailyLog";
+export * from "./supplements";
 export * from "./settings";
 export * from "./api";
 export * from "./dashboard";

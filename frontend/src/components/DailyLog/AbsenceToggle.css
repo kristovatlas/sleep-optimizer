@@ -1,0 +1,77 @@
+/* Explicit-absence ("none today") states. Rust = the amber/red family's
+ * negative-but-recorded tone (ADR 004: circadian palette only), derived from
+ * the existing --color-warning token so both themes stay in-palette. */
+
+.absence-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.absence-toggle-btn {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px dashed var(--color-border-light);
+  font-size: 0.8rem;
+  padding: 4px 12px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.absence-toggle--active .absence-toggle-btn {
+  border-style: solid;
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.absence-toggle-state,
+.section-none-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+}
+
+/* Section body dimmed while marked absent (still interactive: adding an
+ * entry auto-clears the absence). */
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.section-body--absent {
+  opacity: 0.45;
+}
+
+.absence-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.absence-chip-row-label {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.absence-chip {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px dashed var(--color-border-light);
+  font-size: 0.8rem;
+  padding: 3px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.absence-chip--active {
+  border-style: solid;
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+}

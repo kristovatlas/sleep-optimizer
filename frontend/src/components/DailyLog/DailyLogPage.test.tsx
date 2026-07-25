@@ -20,6 +20,7 @@ const mockLogOut = {
   sunlight_entries: [],
   red_light_entries: [],
   nsdr_entries: [],
+  section_absences: [],
 };
 
 const mockSettings = {
@@ -36,20 +37,31 @@ const mockSettings = {
   onboarding_completed: true,
 };
 
-function mockFetch() {
+function mockFetch(
+  log: Record<string, unknown> = mockLogOut,
+  products: unknown[] = [],
+) {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const urlStr = typeof url === "string" ? url : url.toString();
     if (urlStr.includes("/api/settings")) {
       return new Response(JSON.stringify(mockSettings));
     }
+    if (urlStr.includes("/api/supplement-products")) {
+      return new Response(JSON.stringify(products));
+    }
     if (
       urlStr.includes("/api/daily-log/") &&
       (!init || !init.method || init.method === "GET")
     ) {
-      return new Response(JSON.stringify(mockLogOut));
+      return new Response(JSON.stringify(log));
     }
     if (urlStr.includes("/api/daily-log/") && init?.method === "PUT") {
-      return new Response(JSON.stringify({ data: mockLogOut, warnings: [] }));
+      // Echo the payload like the real backend does — a canned response
+      // would silently reset the form and mask round-trip bugs.
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ data: { ...log, ...body }, warnings: [] }),
+      );
     }
     if (urlStr.includes("/api/red-light-panels")) {
       return new Response(JSON.stringify([]));
@@ -58,6 +70,20 @@ function mockFetch() {
       status: 404,
     });
   });
+}
+
+/** The body of the most recent PUT to the daily-log endpoint. */
+function lastPutBody(): Record<string, unknown> {
+  const calls = vi.mocked(globalThis.fetch).mock.calls;
+  const puts = calls.filter(
+    ([, init]) => init && (init as RequestInit).method === "PUT",
+  );
+  expect(puts.length).toBeGreaterThan(0);
+  const [, init] = puts[puts.length - 1];
+  return JSON.parse(String((init as RequestInit).body)) as Record<
+    string,
+    unknown
+  >;
 }
 
 function renderPage(date = "2024-06-15") {
@@ -338,5 +364,92 @@ describe("DailyLogPage", () => {
     });
     expect(screen.getByText("Supplements")).toBeInTheDocument();
     expect(screen.getByText("Naps")).toBeInTheDocument();
+  });
+
+  // --- #159/#161: explicit absence — THE ROUND-TRIP CONTRACT ---
+  // The PUT replaces the day's section_absences wholesale, so every save
+  // must round-trip the loaded keys or an unrelated edit wipes them.
+
+  it("ROUND-TRIP CONTRACT: saving an unrelated edit keeps the day's absences", async () => {
+    mockFetch({ ...mockLogOut, section_absences: ["sauna", "alcohol"] });
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Edit something unrelated to any absence
+    await user.type(
+      screen.getByPlaceholderText("Any other notes about today..."),
+      "slept fine",
+    );
+    await user.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual(["sauna", "alcohol"]);
+    });
+  });
+
+  it("Mark none today puts the key in the payload; Undo removes it", async () => {
+    mockFetch();
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Caffeine section is open by default
+    await user.click(
+      screen.getByRole("button", { name: "Mark caffeine none today" }),
+    );
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual(["caffeine"]);
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Undo — restore caffeine today" }),
+    );
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual([]);
+    });
+  });
+
+  it("adding an entry clears that section's absence key", async () => {
+    mockFetch({ ...mockLogOut, section_absences: ["caffeine", "sauna"] });
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: "Undo — restore caffeine today" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByText("+ Espresso (63mg)"));
+    await user.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      // caffeine cleared by the new entry; unrelated sauna key survives
+      expect(lastPutBody().section_absences).toEqual(["sauna"]);
+    });
+  });
+
+  it("habit none-today chips toggle their own keys", async () => {
+    mockFetch();
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Habits")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Habits/ }));
+    await user.click(screen.getByRole("button", { name: "No sauna today" }));
+    await user.click(screen.getByRole("button", { name: "No alcohol today" }));
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual(["sauna", "alcohol"]);
+    });
   });
 });
