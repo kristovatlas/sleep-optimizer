@@ -257,3 +257,33 @@ def test_delete_absence_only_referenced_product_conflicts(client: TestClient) ->
     day = client.get("/api/daily-log/2025-06-15")
     assert day.status_code == 200
     assert day.json()["section_absences"] == [f"supplement:{pid}"]
+
+
+def test_create_product_rejects_non_finite_numbers(client: TestClient) -> None:
+    """Round-3 delta (Codex P2): 1e309 parses as +inf, satisfies gt=0, persists,
+    then 500s on every subsequent list/get serialization — a poison row. The
+    schema now requires finite floats, so it 422s at the boundary."""
+    # send raw JSON text: 1e309 is valid JSON that parses to +inf server-side
+    # (the test client's own serializer would refuse inf via json=)
+    for field in ("step", "default_dose"):
+        resp = client.post(
+            "/api/supplement-products",
+            content='{"name": "X", "%s": 1e309}' % field,
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, field
+    # and the library stays readable
+    assert client.get("/api/supplement-products").status_code == 200
+
+
+def test_update_product_rejects_non_finite_numbers(client: TestClient) -> None:
+    created = client.post("/api/supplement-products", json={"name": "Zinc"})
+    pid = created.json()["id"]
+    for field in ("step", "default_dose"):
+        resp = client.patch(
+            f"/api/supplement-products/{pid}",
+            content='{"%s": 1e309}' % field,
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, field
+    assert client.get(f"/api/supplement-products/{pid}").status_code == 200

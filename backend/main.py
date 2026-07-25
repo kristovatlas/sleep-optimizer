@@ -1,12 +1,16 @@
 """Somnus — Sleep Optimization App. FastAPI application entry point."""
 
+import math
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 
 from backend.config import codespaces_hosts, settings
 from backend.database import init_db
@@ -39,6 +43,28 @@ app = FastAPI(
     version=VERSION,
     lifespan=lifespan,
 )
+
+
+# Pydantic's 422 detail echoes the offending input; a non-finite float there
+# (e.g. 1e309 -> inf, rejected by allow_inf_nan=False fields) is not JSON
+# serializable, so the default handler would crash while RENDERING the 422
+# (#161 Lane 3a round-3 delta). Sanitize non-finite floats to their repr so
+# the 422 is always deliverable. Behavior is otherwise identical to FastAPI's
+# default (same shape, same status).
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(_request: Request, exc: RequestValidationError) -> Response:
+    def _safe(value: object) -> object:
+        if isinstance(value, float) and not math.isfinite(value):
+            return repr(value)
+        if isinstance(value, dict):
+            return {k: _safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_safe(v) for v in value]
+        return value
+
+    errors = [{k: _safe(v) for k, v in err.items()} for err in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
 
 app.add_middleware(
     CORSMiddleware,

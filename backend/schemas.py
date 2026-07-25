@@ -100,10 +100,15 @@ class MealEntryOut(BaseModel):
 class SupplementEntryCreate(BaseModel):
     time: dt.time | None = None
     name: str = Field(max_length=100)
-    dose_mg: float | None = None
+    # ge=0 + finite: a negative or infinite dose would silently corrupt the
+    # per-product predictor sums (Codex P2, Lane 3a round 3); 0 stays legal
+    # (dose-as-state: 0 == "none today" in the UI contract).
+    dose_mg: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # #161 Lane 3a: optional link to a library product. NULL = legacy free-text
     # entry (un-analyzed). The value is in the product's unit (see the model).
-    product_id: int | None = None
+    # Bounded to SQLite's signed-int range (an id >= 2**63 overflows the bind
+    # into an uncaught 500 — Codex hardening note).
+    product_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
 
 
 class SupplementEntryOut(BaseModel):
@@ -124,9 +129,9 @@ class SupplementProductCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     brand: str | None = Field(default=None, max_length=100)
     form: str | None = Field(default=None, max_length=50)
-    default_dose: float | None = Field(default=None, ge=0)
+    default_dose: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     unit: str = Field(default="mg", min_length=1, max_length=10)
-    step: float = Field(default=0.5, gt=0)
+    step: float = Field(default=0.5, gt=0, allow_inf_nan=False)
     is_sticky: bool = False
 
 
@@ -136,9 +141,9 @@ class SupplementProductUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     brand: str | None = Field(default=None, max_length=100)
     form: str | None = Field(default=None, max_length=50)
-    default_dose: float | None = Field(default=None, ge=0)
+    default_dose: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     unit: str | None = Field(default=None, min_length=1, max_length=10)
-    step: float | None = Field(default=None, gt=0)
+    step: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     is_sticky: bool | None = None
 
     # On the DB model name/unit/step/is_sticky are NOT NULL, but PATCH-optional

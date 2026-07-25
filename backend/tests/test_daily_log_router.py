@@ -634,3 +634,33 @@ def test_redlight_distance_upper_bound_rejected(client: TestClient) -> None:
         },
     )
     assert r.status_code == 422
+
+
+def test_supplement_entry_rejects_negative_and_non_finite_dose(client: TestClient) -> None:
+    """Round-3 delta (Codex P2): a negative or infinite dose_mg on a
+    product-linked entry would corrupt the per-product predictor sums.
+    ge=0 + finite at the schema boundary; 0 stays legal (none-today)."""
+    day = "2025-06-15"
+    for bad_dose in ("-1", "1e309"):  # raw JSON text; 1e309 -> +inf server-side
+        resp = client.put(
+            f"/api/daily-log/{day}",
+            content='{"supplement_entries": [{"name": "Melatonin", "dose_mg": %s}]}' % bad_dose,
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, bad_dose
+    # zero-dose is the legal none-today form
+    ok = client.put(
+        f"/api/daily-log/{day}",
+        json={"supplement_entries": [{"name": "Melatonin", "dose_mg": 0}]},
+    )
+    assert ok.status_code == 200
+
+
+def test_supplement_entry_product_id_bounded_to_sqlite_int(client: TestClient) -> None:
+    """product_id >= 2**63 overflowed the SQLite bind into an uncaught 500
+    (Codex hardening note); now 422 at the schema boundary."""
+    resp = client.put(
+        "/api/daily-log/2025-06-16",
+        json={"supplement_entries": [{"name": "X", "product_id": 2**63}]},
+    )
+    assert resp.status_code == 422
