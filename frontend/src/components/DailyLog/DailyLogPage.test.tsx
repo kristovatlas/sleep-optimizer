@@ -587,4 +587,153 @@ describe("DailyLogPage", () => {
       "Copied 1 supplement from yesterday",
     );
   });
+
+  /** Mock where the viewed day is blank and yesterday holds the given
+   * supplement rows. */
+  function mockYesterdaySupplements(
+    yesterday: string,
+    supplementEntries: unknown[],
+  ) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes(`/api/daily-log/${yesterday}`)) {
+        return new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: yesterday,
+            supplement_entries: supplementEntries,
+          }),
+        );
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+  }
+
+  it("copy-yesterday keeps split-dose rows distinct (two rows of one product)", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    mockYesterdaySupplements(yesterday, [
+      {
+        id: 11,
+        date: yesterday,
+        time: "09:00:00",
+        name: "Melatonin",
+        dose_mg: 200,
+        product_id: 5,
+      },
+      {
+        id: 12,
+        date: yesterday,
+        time: "22:00:00",
+        name: "Melatonin",
+        dose_mg: 200,
+        product_id: 5,
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+
+    // Two source rows → two destination rows — split dosing must not
+    // collapse into one via product re-matching
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      ).toHaveLength(2);
+    });
+    const times = screen.getAllByLabelText("Melatonin time");
+    expect(times[0]).toHaveDisplayValue("09:00");
+    expect(times[1]).toHaveDisplayValue("22:00");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Copied 2 supplements from yesterday",
+    );
+  });
+
+  it("copy-yesterday strips the time from a 0-dose (none today) row", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    // A pre-fix save could hold dose 0 alongside a time; copying it must
+    // not re-create the phantom timing sample
+    mockYesterdaySupplements(yesterday, [
+      {
+        id: 11,
+        date: yesterday,
+        time: "21:00:00",
+        name: "Melatonin",
+        dose_mg: 0,
+        product_id: 5,
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(0);
+    expect(screen.queryByLabelText("Melatonin time")).not.toBeInTheDocument();
+  });
+
+  it("sticky rows re-apply on a return visit to a still-unsaved today", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      // No day is saved anywhere
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage(todayStr());
+
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(3);
+
+    // Away to yesterday (blank past day: no sticky fabrication there) ...
+    await user.click(screen.getByRole("button", { name: "Previous day" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      ).not.toBeInTheDocument();
+    });
+
+    // ... and back: the 404 refetch reset the form, so sticky must re-apply
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(3);
+    expect(
+      screen.getAllByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveLength(1); // applied once, not stacked
+  });
 });

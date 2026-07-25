@@ -22,8 +22,23 @@ import "./SupplementSection.css";
  * `supplement:<pid>` absence keys. One canonical representation, no
  * dual-write drift; keys arriving from other writers still round-trip
  * untouched through the page's section_absences state. "Mark all none today"
- * zeroes every listed row (sticky products guarantee daily-routine products
- * are listed).
+ * zeroes every product-linked row (sticky products guarantee daily-routine
+ * products are listed); legacy free-text rows are left untouched — a 0 on an
+ * unlinked row carries no analysis meaning.
+ *
+ * A 0-dose row also never carries a time: Lane 2's timing predictor
+ * (supplement_hbb_<pid>) samples the time of EVERY product entry regardless
+ * of dose, so a 0-dose row with a time would fabricate a timing sample for a
+ * product that was not taken. Every path that lands a dose on 0 (typed 0,
+ * − nudge, "Mark all none today") clears the row's time, and a none-today
+ * row offers no "+ time" chip (a time saved alongside dose 0 by an older
+ * client still displays and can be cleared). Re-typing a positive dose
+ * leaves the time cleared for the user to re-set.
+ *
+ * When the library fetch failed (products === null), product-linked rows
+ * render degraded: stored name as read-only text, unit "—", ± disabled —
+ * editing against guessed unit/step defaults must not persist mismatched
+ * values. The typed dose stays editable (it is unit-agnostic on the entry).
  */
 
 interface SupplementSectionProps {
@@ -50,6 +65,15 @@ function nowTimeStr(): string {
 function nudged(dose: number | null, step: number, dir: 1 | -1): number {
   const next = Math.max(0, (dose ?? 0) + dir * step);
   return Math.round(next * 1000) / 1000;
+}
+
+/** Set a row's dose; a dose landing on 0 drops the time so a "none today"
+ * row can never feed the Lane-2 timing predictor a phantom sample. */
+function withDose(
+  entry: SupplementEntryCreate,
+  dose: number | null,
+): SupplementEntryCreate {
+  return { ...entry, dose_mg: dose, time: dose === 0 ? null : entry.time };
 }
 
 function rowForProduct(p: SupplementProduct): SupplementEntryCreate {
@@ -164,8 +188,12 @@ export function SupplementSection({
   const renderRow = (entry: SupplementEntryCreate, i: number) => {
     const product =
       entry.product_id != null ? byId.get(entry.product_id) : undefined;
+    // Library fetch failed → the product's real name/unit/step are unknown.
+    // Render the row degraded (read-only name, "—" unit, ± disabled) rather
+    // than let edits against guessed defaults persist mismatched values.
+    const degraded = entry.product_id != null && products === null;
     const name = product?.name ?? entry.name;
-    const unit = product?.unit ?? "mg";
+    const unit = degraded ? "—" : (product?.unit ?? "mg");
     const step = product?.step ?? 0.5;
     const meta = product
       ? [product.brand, product.form].filter(Boolean).join(" · ")
@@ -175,8 +203,8 @@ export function SupplementSection({
     return (
       <div key={i} className={`supp-row${isNone ? " supp-row--none" : ""}`}>
         <div className="supp-row-info">
-          {product ? (
-            <span className="supp-row-name">{product.name}</span>
+          {product != null || degraded ? (
+            <span className="supp-row-name">{name}</span>
           ) : (
             <input
               className="supp-row-name-input"
@@ -197,11 +225,9 @@ export function SupplementSection({
               type="button"
               className="supp-dose-nudge"
               aria-label={`Decrease ${name} dose`}
+              disabled={degraded}
               onClick={() =>
-                updateEntry(i, {
-                  ...entry,
-                  dose_mg: nudged(entry.dose_mg, step, -1),
-                })
+                updateEntry(i, withDose(entry, nudged(entry.dose_mg, step, -1)))
               }
             >
               −
@@ -217,21 +243,22 @@ export function SupplementSection({
               onWheel={blurOnWheel}
               onChange={(e) => {
                 const v = e.target.value === "" ? null : Number(e.target.value);
-                updateEntry(i, {
-                  ...entry,
-                  dose_mg: v == null || Number.isNaN(v) ? null : Math.max(0, v),
-                });
+                // A typed negative is a typo — ignore it rather than clamp
+                // to 0, which would fabricate a recorded "none today" skip.
+                if (v != null && v < 0) return;
+                updateEntry(
+                  i,
+                  withDose(entry, v == null || Number.isNaN(v) ? null : v),
+                );
               }}
             />
             <button
               type="button"
               className="supp-dose-nudge"
               aria-label={`Increase ${name} dose`}
+              disabled={degraded}
               onClick={() =>
-                updateEntry(i, {
-                  ...entry,
-                  dose_mg: nudged(entry.dose_mg, step, 1),
-                })
+                updateEntry(i, withDose(entry, nudged(entry.dose_mg, step, 1)))
               }
             >
               +
@@ -261,7 +288,7 @@ export function SupplementSection({
                 ×
               </button>
             </span>
-          ) : (
+          ) : isNone ? null : ( // no "+ time" on a none-today row — see header
             <button
               type="button"
               className="supp-chip"
@@ -300,11 +327,19 @@ export function SupplementSection({
         >
           ⟲ Copy yesterday
         </button>
-        {entries.some((e) => e.dose_mg !== 0) && (
+        {entries.some((e) => e.product_id != null && e.dose_mg !== 0) && (
           <button
             type="button"
             className="supp-chip"
-            onClick={() => onChange(entries.map((e) => ({ ...e, dose_mg: 0 })))}
+            onClick={() =>
+              // Product-linked rows only: 0 on a legacy free-text row has no
+              // analysis meaning. Times drop with the dose (see withDose).
+              onChange(
+                entries.map((e) =>
+                  e.product_id == null ? e : { ...e, dose_mg: 0, time: null },
+                ),
+              )
+            }
           >
             Mark all none today
           </button>

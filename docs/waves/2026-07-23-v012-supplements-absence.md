@@ -132,16 +132,24 @@ management are Lane 3.
   step, unit label), per-entry time chip (set/clear), × remove; add-from-
   library picker (type-to-filter) + minimal inline product create (name
   required; brand/form/dose/unit/step/sticky); "⟲ Copy yesterday" (#110)
-  merges yesterday's rows (update matching product rows, append the rest);
-  sticky products auto-appear at default dose on a not-yet-saved TODAY only
-  (auto-filling a browsed blank past day would fabricate history).
+  merges yesterday's rows — each source row claims a distinct matching
+  product row (split dosing copies as two rows, never collapses), the rest
+  append; sticky products auto-appear at default dose on a not-yet-saved
+  TODAY only (auto-filling a browsed blank past day would fabricate history),
+  re-applying on a return visit to a still-unsaved today.
   **None-today data model (decided here): dose IS the state — per-supplement
   "none today" is recorded ONLY as a 0-dose product-linked entry row, never as
   a `supplement:<pid>` absence key.** A 0-dose entry aggregates to
   `supplement_dose_<pid>` = 0.0 in Lane 2 (sum of [0.0]), identical to what an
   absence key yields, so one canonical representation suffices and there is no
-  dual-write drift; "Mark all none today" zeroes every listed row. Keys written
-  by other clients still round-trip untouched.
+  dual-write drift. The equivalence holds for timing too because a 0-dose row
+  never carries a time: Lane 2 samples `supplement_hbb_<pid>` from every
+  product entry's time regardless of dose, so the UI clears the time on every
+  path that lands a dose on 0 and offers no "+ time" chip on a none-today
+  row — `supplement_hbb_<pid>` stays NULL exactly as an absence key leaves it.
+  "Mark all none today" zeroes every product-linked row (times dropped;
+  legacy free-text rows untouched — 0 on an unlinked row has no analysis
+  meaning). Keys written by other clients still round-trip untouched.
   **ROUND-TRIP CONTRACT enforced structurally:** `section_absences` is part of
   `DailyLogCreate` form state, `outToCreate` carries it from every GET, and the
   PUT sends the whole form — covered first by a dedicated regression test

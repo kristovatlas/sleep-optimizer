@@ -96,7 +96,17 @@ export function DailyLogPage() {
   // blank PAST day the user merely browses would fabricate history.
   const stickyAppliedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (loading || exists || loadError || !isToday || products === null) return;
+    // Re-arm whenever a load is in flight: every completed load replaces the
+    // form (a 404 resets it to empty), so a marker from before the load is
+    // stale — without this, navigating away and back to a still-unsaved
+    // today would skip re-applying rows the refetch just wiped. Between
+    // loads the marker blocks double-apply, and a saved/existing day never
+    // applies (exists guard below).
+    if (loading) {
+      stickyAppliedFor.current = null;
+      return;
+    }
+    if (exists || loadError || !isToday || products === null) return;
     if (stickyAppliedFor.current === currentDate) return;
     stickyAppliedFor.current = currentDate;
     const sticky = products.filter((p) => p.is_sticky);
@@ -201,8 +211,10 @@ export function DailyLogPage() {
   };
 
   /** #110: pull yesterday's supplement rows (products, doses, times) into
-   * today's unsaved state. Rows for a product already listed are updated in
-   * place; the rest are appended. Resolves the number of source entries. */
+   * today's unsaved state. Each source row claims a DISTINCT pre-existing
+   * row (split dosing — two rows of one product — must copy as two rows,
+   * never collapse into one); unmatched source rows are appended. Resolves
+   * the number of source entries. */
   const copyYesterdaySupplements = async (): Promise<number> => {
     let out: DailyLogOut;
     try {
@@ -213,7 +225,10 @@ export function DailyLogPage() {
     }
     const rows = out.supplement_entries.map(
       ({ time, name, dose_mg, product_id }) => ({
-        time,
+        // A 0-dose row is "none today" and must never carry a time (it would
+        // feed the timing predictor a phantom sample) — strip times that
+        // pre-fix saves may have left alongside a 0 dose.
+        time: dose_mg === 0 ? null : time,
         name,
         dose_mg,
         product_id,
@@ -222,15 +237,22 @@ export function DailyLogPage() {
     if (rows.length === 0) return 0;
     setFormData((prev) => {
       const next = [...prev.supplement_entries];
+      const claimed = new Set<number>();
       for (const row of rows) {
-        const idx = next.findIndex((e) =>
-          row.product_id != null
-            ? e.product_id === row.product_id
-            : e.product_id == null && e.name === row.name,
+        const idx = next.findIndex(
+          (e, j) =>
+            !claimed.has(j) &&
+            (row.product_id != null
+              ? e.product_id === row.product_id
+              : e.product_id == null && e.name === row.name),
         );
         if (idx >= 0) {
           next[idx] = { ...next[idx], dose_mg: row.dose_mg, time: row.time };
+          claimed.add(idx);
         } else {
+          // Appended rows are claimed too: a second source row of the same
+          // product must append its own row, not overwrite the first.
+          claimed.add(next.length);
           next.push(row);
         }
       }

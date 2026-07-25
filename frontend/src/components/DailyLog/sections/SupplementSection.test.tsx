@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { SupplementSection } from "./SupplementSection";
@@ -60,6 +60,24 @@ function Harness({
       onCopyYesterday={onCopyYesterday}
     />
   );
+}
+
+/** Render with a spy onChange to assert the exact emitted payload. */
+function renderSpy(
+  entries: SupplementEntryCreate[],
+  products: SupplementProduct[] | null = [melatonin, magnesium],
+) {
+  const onChange = vi.fn();
+  render(
+    <SupplementSection
+      entries={entries}
+      onChange={onChange}
+      products={products}
+      onCreateProduct={vi.fn()}
+      onCopyYesterday={vi.fn(async () => 0)}
+    />,
+  );
+  return onChange;
 }
 
 describe("SupplementSection", () => {
@@ -256,14 +274,14 @@ describe("SupplementSection", () => {
     );
   });
 
-  it("Mark all none today zeroes every listed row", async () => {
+  it("Mark all none today zeroes every product row AND clears their times", async () => {
     const user = userEvent.setup();
     render(
       <Harness
         initial={[
-          melatoninRow(3),
+          { ...melatoninRow(3), time: "21:30:00" },
           {
-            time: null,
+            time: "22:00:00",
             name: "Magnesium Glycinate",
             dose_mg: 200,
             product_id: 2,
@@ -282,10 +300,147 @@ describe("SupplementSection", () => {
     expect(
       screen.getByRole("spinbutton", { name: "Magnesium Glycinate dose (mg)" }),
     ).toHaveValue(0);
+    // A 0-dose row must not keep a time — it would fabricate a timing sample
+    expect(screen.queryByLabelText("Melatonin time")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Magnesium Glycinate time"),
+    ).not.toBeInTheDocument();
     // All rows at 0 → nothing left to mark
     expect(
       screen.queryByRole("button", { name: "Mark all none today" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("Mark all none today leaves legacy free-text rows untouched", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        initial={[
+          melatoninRow(3),
+          { time: null, name: "Mystery blend", dose_mg: 100, product_id: null },
+        ]}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Mark all none today" }),
+    );
+    // Only the product-linked row is marked; 0 on an unlinked row would
+    // carry no analysis meaning
+    expect(screen.getAllByText("none today")).toHaveLength(1);
+    expect(
+      screen.getByRole("spinbutton", { name: "Mystery blend dose (mg)" }),
+    ).toHaveValue(100);
+  });
+
+  it("Mark all none today is not offered when only free-text rows hold doses", () => {
+    render(
+      <Harness
+        initial={[
+          { time: null, name: "Mystery blend", dose_mg: 100, product_id: null },
+        ]}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Mark all none today" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // --- zero-dose ⇒ no time (a 0-dose row must never feed the Lane-2
+  // timing predictor a phantom sample for a product that was not taken) ---
+
+  it("typing dose 0 emits time: null alongside the 0", () => {
+    const onChange = renderSpy([{ ...melatoninRow(3), time: "21:30:00" }]);
+    fireEvent.change(
+      screen.getByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      { target: { value: "0" } },
+    );
+    expect(onChange).toHaveBeenCalledWith([
+      { time: null, name: "Melatonin", dose_mg: 0, product_id: 1 },
+    ]);
+  });
+
+  it("− nudging a dose down to 0 also clears the time", async () => {
+    const user = userEvent.setup();
+    const onChange = renderSpy([{ ...melatoninRow(0.5), time: "21:30:00" }]);
+    await user.click(
+      screen.getByRole("button", { name: "Decrease Melatonin dose" }),
+    );
+    expect(onChange).toHaveBeenCalledWith([
+      { time: null, name: "Melatonin", dose_mg: 0, product_id: 1 },
+    ]);
+  });
+
+  it("re-typing a positive dose after 0 leaves the time cleared", async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={[{ ...melatoninRow(3), time: "21:30:00" }]} />);
+    const dose = screen.getByRole("spinbutton", {
+      name: "Melatonin dose (mg)",
+    });
+
+    await user.clear(dose);
+    await user.type(dose, "0");
+    // Time dropped, and a none-today row offers no "+ time" chip either
+    expect(screen.queryByLabelText("Melatonin time")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Set Melatonin time" }),
+    ).not.toBeInTheDocument();
+
+    await user.clear(dose);
+    await user.type(dose, "2");
+    // Positive again: time stays cleared (re-settable, never resurrected)
+    expect(screen.queryByLabelText("Melatonin time")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Set Melatonin time" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a typed negative dose is ignored — never clamped into a recorded skip", () => {
+    const onChange = renderSpy([melatoninRow(3)]);
+    fireEvent.change(
+      screen.getByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      { target: { value: "-3" } },
+    );
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  // --- library fetch failure (products === null) degrades linked rows ---
+
+  it("renders product-linked rows read-only-degraded when the library failed", () => {
+    render(
+      <Harness
+        initial={[
+          melatoninRow(3),
+          { time: null, name: "Mystery blend", dose_mg: 100, product_id: null },
+        ]}
+        products={null}
+      />,
+    );
+
+    // Linked row: stored name as plain text (no editable input), unknown unit
+    expect(screen.getByText("Melatonin")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Supplement 1 name" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Decrease Melatonin dose" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Increase Melatonin dose" }),
+    ).toBeDisabled();
+    // The typed dose stays editable — it is unit-agnostic on the entry
+    expect(
+      screen.getByRole("spinbutton", { name: "Melatonin dose (—)" }),
+    ).toBeEnabled();
+
+    // Free-text rows never depended on the library: still fully editable
+    expect(
+      screen.getByRole("textbox", { name: "Supplement 2 name" }),
+    ).toHaveValue("Mystery blend");
+    expect(
+      screen.getByRole("button", { name: "Decrease Mystery blend dose" }),
+    ).toBeEnabled();
   });
 
   it("legacy free-text rows stay editable with an mg unit", async () => {
