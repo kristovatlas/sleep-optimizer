@@ -746,6 +746,69 @@ describe("DailyLogPage", () => {
   // --- stale-response guards: async supplement callbacks started on one
   // day must not write into another day's form after navigation ---
 
+  it("a copy-DAY response landing after date navigation is discarded", async () => {
+    // Same stale-guard class for the CopyDayButton path: the copy POST
+    // commits server-side to day A; a late response must not replace day
+    // B's form (Save would PUT A's data onto B).
+    const dayA = "2024-06-15";
+    let resolveCopy: (r: Response) => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([]));
+      }
+      if (urlStr.includes("/copy-from/") && init?.method === "POST") {
+        return new Promise<Response>((res) => {
+          resolveCopy = res;
+        });
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage(dayA);
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Open the copy picker and start the copy on day A...
+    await user.click(
+      screen.getByRole("button", { name: "Copy from another day" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+    // ...then navigate to day B while the POST is in flight.
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+    const notesBefore = (screen.getByLabelText("Notes") as HTMLTextAreaElement)
+      .value;
+
+    await act(async () => {
+      resolveCopy(
+        new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: dayA,
+            notes: "COPIED-ONTO-WRONG-DAY",
+          }),
+        ),
+      );
+    });
+
+    // Day B's form must be untouched by day A's late copy response.
+    expect((screen.getByLabelText("Notes") as HTMLTextAreaElement).value).toBe(
+      notesBefore,
+    );
+    expect(
+      screen.queryByDisplayValue("COPIED-ONTO-WRONG-DAY"),
+    ).not.toBeInTheDocument();
+  });
+
   it("a copy-yesterday response landing after date navigation is discarded", async () => {
     localStorage.setItem("somnus-section-supplements", "true");
     const yesterday = addDays("2024-06-15", -1);

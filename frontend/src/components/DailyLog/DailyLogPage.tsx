@@ -232,6 +232,12 @@ export function DailyLogPage() {
         };
 
   const handleCopied = (log: DailyLogOut) => {
+    // Same stale-date guard as copy-yesterday/create-product: the copy POST
+    // commits server-side to the day it was started on; if the user has
+    // navigated since, the late response must not replace the CURRENT day's
+    // form (Save would then PUT day A's data onto day B). The server copy
+    // itself is correct and shows up when navigating back to day A.
+    if (log.date !== viewedDateRef.current) return;
     setFormData(outToCreate(log));
   };
 
