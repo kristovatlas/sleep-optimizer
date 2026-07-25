@@ -268,7 +268,7 @@ def test_create_product_rejects_non_finite_numbers(client: TestClient) -> None:
     for field in ("step", "default_dose"):
         resp = client.post(
             "/api/supplement-products",
-            content='{"name": "X", "%s": 1e309}' % field,
+            content='{"name": "X", "' + field + '": 1e309}',
             headers={"Content-Type": "application/json"},
         )
         assert resp.status_code == 422, field
@@ -282,7 +282,7 @@ def test_update_product_rejects_non_finite_numbers(client: TestClient) -> None:
     for field in ("step", "default_dose"):
         resp = client.patch(
             f"/api/supplement-products/{pid}",
-            content='{"%s": 1e309}' % field,
+            content='{"' + field + '": 1e309}',
             headers={"Content-Type": "application/json"},
         )
         assert resp.status_code == 422, field

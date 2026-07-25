@@ -644,7 +644,7 @@ def test_supplement_entry_rejects_negative_and_non_finite_dose(client: TestClien
     for bad_dose in ("-1", "1e309"):  # raw JSON text; 1e309 -> +inf server-side
         resp = client.put(
             f"/api/daily-log/{day}",
-            content='{"supplement_entries": [{"name": "Melatonin", "dose_mg": %s}]}' % bad_dose,
+            content='{"supplement_entries": [{"name": "Melatonin", "dose_mg": ' + bad_dose + "}]}",
             headers={"Content-Type": "application/json"},
         )
         assert resp.status_code == 422, bad_dose
