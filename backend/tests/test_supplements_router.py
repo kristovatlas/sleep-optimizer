@@ -135,6 +135,79 @@ def test_update_product_null_clears_nullable_fields(client: TestClient) -> None:
     assert body["name"] == "Magnesium Glycinate"  # untouched
 
 
+# --- update: unit immutable once the product has logged history ---
+
+
+def _log_entry_for(client: TestClient, pid: int) -> None:
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"supplement_entries": [{"name": "Melatonin", "dose_mg": 3, "product_id": pid}]},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def _log_absence_for(client: TestClient, pid: int) -> None:
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [f"supplement:{pid}"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_patch_unit_on_entry_referenced_product_conflicts(client: TestClient) -> None:
+    """dose_mg stores a bare number; the unit lives on the product. Changing
+    mg→g on a product with logged entries would retroactively reinterpret every
+    historical dose, so it must 409 and leave the unit untouched."""
+    pid = _create(client, name="Melatonin", unit="mg")["id"]
+    _log_entry_for(client, pid)
+    resp = client.patch(f"/api/supplement-products/{pid}", json={"unit": "g"})
+    assert resp.status_code == 409
+    assert client.get(f"/api/supplement-products/{pid}").json()["unit"] == "mg"
+
+
+def test_patch_unit_on_absence_only_referenced_product_conflicts(client: TestClient) -> None:
+    """An explicit 'none today' (0 of the product) is history in the product's
+    unit too — absence-only references also freeze the unit."""
+    pid = _create(client, name="Melatonin", unit="mg")["id"]
+    _log_absence_for(client, pid)
+    resp = client.patch(f"/api/supplement-products/{pid}", json={"unit": "g"})
+    assert resp.status_code == 409
+    assert client.get(f"/api/supplement-products/{pid}").json()["unit"] == "mg"
+
+
+def test_patch_unit_on_unreferenced_product_ok(client: TestClient) -> None:
+    """No history yet → nothing to reinterpret; unit stays freely editable."""
+    pid = _create(client, name="Melatonin", unit="mg")["id"]
+    resp = client.patch(f"/api/supplement-products/{pid}", json={"unit": "g"})
+    assert resp.status_code == 200
+    assert resp.json()["unit"] == "g"
+
+
+def test_patch_name_on_referenced_product_ok(client: TestClient) -> None:
+    """Non-unit fields are labels/defaults, not reinterpretations — a
+    referenced product stays editable everywhere except unit."""
+    pid = _create(client, name="Melatonin", unit="mg")["id"]
+    _log_entry_for(client, pid)
+    resp = client.patch(f"/api/supplement-products/{pid}", json={"name": "Melatonin 3mg"})
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Melatonin 3mg"
+
+
+def test_patch_unit_equal_to_current_on_referenced_product_ok(client: TestClient) -> None:
+    """A PATCH that *sends* unit but doesn't *change* it (clients often echo
+    the full form) must not false-409."""
+    pid = _create(client, name="Melatonin", unit="mg")["id"]
+    _log_entry_for(client, pid)
+    resp = client.patch(
+        f"/api/supplement-products/{pid}",
+        json={"unit": "mg", "name": "Renamed"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["unit"] == "mg"
+    assert body["name"] == "Renamed"
+
+
 # --- delete (unreferenced allowed; referenced -> 409) ---
 
 

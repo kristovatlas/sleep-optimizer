@@ -31,6 +31,7 @@ from backend.schemas import (
 from backend.security import require_json_content_type
 from backend.services.daily_log_service import (
     ENTRY_TYPE_MAP,
+    UnknownSupplementAbsenceKeyError,
     add_sub_entry,
     copy_day,
     delete_daily_log,
@@ -78,9 +79,18 @@ def upsert_daily_log(
     # (supplement names/doses are health data, T-16-adjacent) — map it to a
     # clean 409 like the sub-entry routes. save_daily_log's delete-old-log +
     # re-insert run in ONE transaction (no intermediate commit), so the
-    # rollback restores any pre-existing day intact.
+    # rollback restores any pre-existing day intact. The same single-transaction
+    # guarantee covers the supplement:* absence-key check: an unknown/malformed
+    # key aborts the save as a 422 (static detail — the key is user text, never
+    # echoed, T-05) with the pre-existing day untouched.
     try:
         log = save_daily_log(db, date, data)
+    except UnknownSupplementAbsenceKeyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail="section_absences contains a supplement key referencing an unknown product",
+        ) from exc
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(

@@ -101,9 +101,18 @@ management are Lane 3.
   `Out` expose `product_id` so entry↔product links round-trip through save and
   copy. New `backend/routers/supplements.py` = supplement library CRUD
   (GET list / POST / GET one / PATCH / DELETE) — **delete policy: a product
-  referenced by any logged entry returns 409 (never hard-delete-orphans);
-  only unreferenced products delete. No `is_retired` column, so no new
+  referenced by any logged entry OR by any `supplement:<id>` absence record
+  returns 409 (never hard-delete-orphans; an absence-only product is still
+  recorded data, review round 2); only unreferenced products delete. Unit
+  policy (round 3): `unit` is immutable once a product has that same logged
+  history — doses are bare numbers in the product's unit, so a unit change
+  would retroactively reinterpret them; PATCH of a different unit → 409,
+  other fields stay editable. No `is_retired` column, so no new
   migration** (schema fields already shipped in Lane 2's migration 005).
+  Save-time guard (round 3): `supplement:*` absence keys must be canonical
+  and resolve to a real library product, else the PUT 422s — otherwise a
+  `supplement:9999` key would fabricate a ghost predictor; plain unknown
+  keys stay stored-but-inert (forward-compat).
   Exports (`backend/routers/export.py`): JSON `ExportData` now carries
   `supplement_products` + per-day `section_absences` + entry `product_id`; the
   CSV archive adds `supplement_products.csv` + `section_absences.csv` and a

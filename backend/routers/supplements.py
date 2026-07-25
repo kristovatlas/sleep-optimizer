@@ -13,6 +13,16 @@ via absence days is still recorded data per ADR 003). Such a delete returns
 409; only an unreferenced product deletes. This is the simplest safe rule with
 no extra schema — no ``is_retired`` column/migration — and it never corrupts
 history.
+
+Unit policy (same reasoning): ``SupplementEntry.dose_mg`` stores a bare number
+whose meaning comes from ``SupplementProduct.unit``, so changing the unit on a
+product with logged history would retroactively reinterpret every historical
+dose (3 mg melatonin silently becomes 3 g in exports/labels). PATCHing ``unit``
+to a *different* value on a referenced product therefore returns 409; the user
+creates a new product instead. Unit stays freely editable while unreferenced,
+and all other fields (name/brand/form/default_dose/step/is_sticky) remain
+editable always — they are labels/defaults, not reinterpretations of stored
+numbers.
 """
 
 from __future__ import annotations
@@ -30,6 +40,28 @@ from backend.schemas import (
 )
 
 router = APIRouter(prefix="/api/supplement-products", tags=["supplements"])
+
+
+def _has_logged_history(db: Session, product_id: int) -> bool:
+    """True if any logged entry OR "none today" absence references the product.
+
+    Mirrors the delete-policy reference check: both a ``SupplementEntry`` row
+    and a ``SectionAbsence`` keyed ``supplement:<id>`` are recorded history
+    whose dose semantics depend on the product's unit (an explicit 0 is a dose
+    too, ADR 003).
+    """
+    referenced_by_entry = (
+        db.query(SupplementEntry).filter(SupplementEntry.product_id == product_id).first()
+        is not None
+    )
+    if referenced_by_entry:
+        return True
+    return (
+        db.query(SectionAbsence)
+        .filter(SectionAbsence.section_key == f"supplement:{product_id}")
+        .first()
+        is not None
+    )
 
 
 @router.get("", response_model=list[SupplementProductOut])
@@ -67,11 +99,31 @@ def update_product(
     data: SupplementProductUpdate,
     db: Session = Depends(get_db),
 ) -> SupplementProductOut:
-    """Partially update a supplement library product (only supplied fields)."""
+    """Partially update a supplement library product (only supplied fields).
+
+    ``unit`` is immutable once the product has logged history (entries or
+    "none today" absences): dose values are bare numbers interpreted in the
+    product's unit, so a unit change would rewrite the meaning of every
+    historical dose. Changing it then returns 409 (see module docstring);
+    sending the *current* unit is a no-op and stays 200.
+    """
     product = db.get(SupplementProduct, product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Supplement product not found")
-    for key, value in data.model_dump(exclude_unset=True).items():
+    updates = data.model_dump(exclude_unset=True)
+    if (
+        "unit" in updates
+        and updates["unit"] != product.unit
+        and _has_logged_history(db, product_id)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Unit cannot change once the product has logged history; "
+                "create a new product instead"
+            ),
+        )
+    for key, value in updates.items():
         setattr(product, key, value)
     db.commit()
     db.refresh(product)

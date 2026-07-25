@@ -1,6 +1,12 @@
 """Tests for daily log HTTP endpoints."""
 
+import datetime as dt
+
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from backend.models import SleepRecord
+from backend.services.stats_engine import prepare_analysis_dataframe
 
 # The SPA's fetch client always sends this header; the T-02 CSRF guard on the
 # bodiless copy-from POST requires it (requests with a JSON body get it from
@@ -450,6 +456,116 @@ def test_put_empty_absence_key_422(client: TestClient) -> None:
         json={"section_absences": [""]},
     )
     assert resp.status_code == 422
+
+
+# --- supplement:* absence keys must resolve to a library product (#161 r3) ---
+
+
+def _create_product(client: TestClient, name: str = "Melatonin") -> int:
+    resp = client.post("/api/supplement-products", json={"name": name})
+    assert resp.status_code == 201, resp.text
+    pid: int = resp.json()["id"]
+    return pid
+
+
+def test_put_unknown_supplement_absence_key_422_nothing_persisted(client: TestClient) -> None:
+    """`supplement:9999` (no such product) would make the stats engine
+    manufacture an unlabeled ghost predictor (supplement_dose_9999) — it must
+    422 at save with a static detail (T-05: the key is user text, not echoed)
+    and persist nothing."""
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": ["supplement:9999"]},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "section_absences contains a supplement key referencing an unknown product"
+    )
+    assert "9999" not in resp.text
+    # Nothing persisted — the day was never created.
+    assert client.get("/api/daily-log/2025-06-15").status_code == 404
+
+
+def test_put_malformed_supplement_absence_key_422(client: TestClient) -> None:
+    """Non-canonical suffixes are junk (or would evade the exact-string
+    reference guards, e.g. leading zeros) — all 422."""
+    pid = _create_product(client)
+    for bad in ("supplement:abc", "supplement:", f"supplement:+{pid}", f"supplement:00{pid}"):
+        resp = client.put(
+            "/api/daily-log/2025-06-15",
+            json={"section_absences": [bad]},
+        )
+        assert resp.status_code == 422, f"{bad}: {resp.status_code} {resp.text}"
+    assert client.get("/api/daily-log/2025-06-15").status_code == 404
+
+
+def test_put_unknown_supplement_absence_key_preserves_existing_day(client: TestClient) -> None:
+    """Same single-transaction guarantee as the FK-failure path: the 422's
+    rollback must restore a pre-existing day intact."""
+    ok = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "original day",
+            "caffeine_entries": [{"amount_mg": 95, "source": "drip_coffee"}],
+            "section_absences": ["sauna"],
+        },
+    )
+    assert ok.status_code == 200, ok.text
+
+    bad = client.put(
+        "/api/daily-log/2025-06-15",
+        json={
+            "notes": "should never land",
+            "section_absences": ["supplement:9999"],
+        },
+    )
+    assert bad.status_code == 422
+
+    after = client.get("/api/daily-log/2025-06-15")
+    assert after.status_code == 200
+    body = after.json()
+    assert body["notes"] == "original day"
+    assert len(body["caffeine_entries"]) == 1
+    assert body["section_absences"] == ["sauna"]
+
+
+def test_put_valid_supplement_absence_ok_and_aggregates_zero(
+    client: TestClient, db: Session
+) -> None:
+    """A supplement:<real id> key saves fine and reaches the analysis layer as
+    an explicit 0.0 dose (none today) for that product."""
+    pid = _create_product(client)
+    resp = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [f"supplement:{pid}"]},
+    )
+    assert resp.status_code == 200, resp.text
+    day = client.get("/api/daily-log/2025-06-15")
+    assert day.json()["section_absences"] == [f"supplement:{pid}"]
+
+    # The dataframe needs a SleepRecord row for the date to emit the day.
+    db.add(SleepRecord(date=dt.date(2025, 6, 15), sleep_score=80))
+    db.commit()
+    df = prepare_analysis_dataframe(db)
+    assert df.loc[dt.date(2025, 6, 15)][f"supplement_dose_{pid}"] == 0.0
+
+
+def test_copy_day_with_valid_supplement_absence(client: TestClient) -> None:
+    """copy_day clones supplement absences (validated at save; the delete guard
+    keeps the product alive) — the copy must succeed and carry the key."""
+    pid = _create_product(client)
+    ok = client.put(
+        "/api/daily-log/2025-06-15",
+        json={"section_absences": [f"supplement:{pid}", "sauna"]},
+    )
+    assert ok.status_code == 200, ok.text
+
+    resp = client.post(
+        "/api/daily-log/2025-06-16/copy-from/2025-06-15",
+        headers=JSON_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    assert sorted(resp.json()["section_absences"]) == sorted([f"supplement:{pid}", "sauna"])
 
 
 def test_redlight_dose_inverse_square_by_distance(client: TestClient) -> None:

@@ -280,11 +280,17 @@ def test_copy_day_overwrites_target(db: Session) -> None:
 
 def test_copy_day_carries_absences(db: Session) -> None:
     """copy_day iterates ENTRY_TYPE_MAP, which omits absences — the copy must
-    clone them onto the target date or a "None today" negative is silently lost."""
-    save_daily_log(db, D1, DailyLogCreate(section_absences=["caffeine", "supplement:3"]))
+    clone them onto the target date or a "None today" negative is silently lost.
+    The supplement key references a real product (round 3: save validates
+    supplement:* keys against the library)."""
+    product = SupplementProduct(name="Melatonin", unit="mg")
+    db.add(product)
+    db.flush()
+    supp_key = f"supplement:{product.id}"
+    save_daily_log(db, D1, DailyLogCreate(section_absences=["caffeine", supp_key]))
     target = copy_day(db, D2, D1)
     assert target is not None
-    assert {a.section_key for a in target.section_absences} == {"caffeine", "supplement:3"}
+    assert {a.section_key for a in target.section_absences} == {"caffeine", supp_key}
     assert all(a.date == D2 for a in target.section_absences)
 
 
