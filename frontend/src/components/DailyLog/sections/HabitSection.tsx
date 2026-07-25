@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import { AbsenceChip } from "../AbsenceToggle";
 import { TimePicker } from "../../shared/TimePicker";
 import { NumberInput } from "../../shared/NumberInput";
 import { SelectInput } from "../../shared/SelectInput";
@@ -13,7 +14,57 @@ import type { HabitEntryCreate } from "../../../types";
 interface HabitSectionProps {
   entries: HabitEntryCreate[];
   onChange: (entries: HabitEntryCreate[]) => void;
+  /** Current section_absences keys (whole day; only habit keys are used). */
+  absences: string[];
+  onToggleAbsence: (key: string) => void;
 }
+
+/** The Habits section hosts several absence keys — one per absence-capable
+ * habit type (#159) — so it gets per-key chips instead of the single
+ * section-level AbsenceToggle. */
+const HABIT_ABSENCE_ITEMS: {
+  key: string;
+  habitType: HabitType;
+  label: string;
+  ariaLabel: string;
+}[] = [
+  {
+    key: "exercise",
+    habitType: HabitType.EXERCISE,
+    label: "Exercise",
+    ariaLabel: "No exercise today",
+  },
+  {
+    key: "alcohol",
+    habitType: HabitType.ALCOHOL,
+    label: "Alcohol",
+    ariaLabel: "No alcohol today",
+  },
+  {
+    key: "blue_blockers",
+    habitType: HabitType.BLUE_BLOCKERS_ON,
+    label: "Blue blockers",
+    ariaLabel: "No blue blockers today",
+  },
+  {
+    key: "screens_off",
+    habitType: HabitType.SCREENS_OFF,
+    label: "Screens off",
+    ariaLabel: "No screens-off today",
+  },
+  {
+    key: "sauna",
+    habitType: HabitType.SAUNA,
+    label: "Sauna",
+    ariaLabel: "No sauna today",
+  },
+  {
+    key: "warm_shower",
+    habitType: HabitType.WARM_SHOWER,
+    label: "Warm shower",
+    ariaLabel: "No warm shower today",
+  },
+];
 
 const EXERCISE_LABELS: Record<string, string> = {
   light: "Light",
@@ -21,7 +72,12 @@ const EXERCISE_LABELS: Record<string, string> = {
   intense: "Intense",
 };
 
-export function HabitSection({ entries, onChange }: HabitSectionProps) {
+export function HabitSection({
+  entries,
+  onChange,
+  absences,
+  onToggleAbsence,
+}: HabitSectionProps) {
   const addEntry = (habitType: HabitType) =>
     onChange([
       ...entries,
@@ -163,6 +219,21 @@ export function HabitSection({ entries, onChange }: HabitSectionProps) {
               + {HABIT_TYPE_LABELS[ht]}
             </button>
           ))}
+      </div>
+
+      <div className="absence-chip-row">
+        <span className="absence-chip-row-label">None today:</span>
+        {HABIT_ABSENCE_ITEMS.filter((it) => !usedTypes.has(it.habitType)).map(
+          (it) => (
+            <AbsenceChip
+              key={it.key}
+              active={absences.includes(it.key)}
+              onToggle={() => onToggleAbsence(it.key)}
+              label={it.label}
+              ariaLabel={it.ariaLabel}
+            />
+          ),
+        )}
       </div>
 
       {entries.map((entry, i) => (

@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { NumberInput } from "../../shared/NumberInput";
 import { SelectInput } from "../../shared/SelectInput";
@@ -11,11 +12,13 @@ import type { StimulatingActivityCreate } from "../../../types";
 interface StimulatingSectionProps {
   entries: StimulatingActivityCreate[];
   onChange: (entries: StimulatingActivityCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 export function StimulatingSection({
   entries,
   onChange,
+  absence,
 }: StimulatingSectionProps) {
   const addEntry = () =>
     onChange([
@@ -36,6 +39,7 @@ export function StimulatingSection({
       title="Stimulating Activities"
       count={entries.length}
       storageKey="stimulating"
+      absence={absence}
     >
       {entries.map((entry, i) => (
         <div

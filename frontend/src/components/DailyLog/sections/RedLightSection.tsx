@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { NumberInput } from "../../shared/NumberInput";
 import { listPanels, type RedLightPanelOut } from "../../../api/redLightPanels";
@@ -8,6 +9,7 @@ import type { RedLightEntryCreate } from "../../../types";
 interface RedLightSectionProps {
   entries: RedLightEntryCreate[];
   onChange: (entries: RedLightEntryCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 /** A panel's rated distance is only a usable session default when positive
@@ -16,7 +18,11 @@ function ratedDistance(inches: number | null | undefined): number | null {
   return inches != null && inches > 0 ? inches : null;
 }
 
-export function RedLightSection({ entries, onChange }: RedLightSectionProps) {
+export function RedLightSection({
+  entries,
+  onChange,
+  absence,
+}: RedLightSectionProps) {
   const [panels, setPanels] = useState<RedLightPanelOut[]>([]);
 
   useEffect(() => {
@@ -67,6 +73,7 @@ export function RedLightSection({ entries, onChange }: RedLightSectionProps) {
       title="Red Light Therapy"
       count={entries.length}
       storageKey="redLight"
+      absence={absence}
     >
       {entries.map((entry, i) => (
         <div

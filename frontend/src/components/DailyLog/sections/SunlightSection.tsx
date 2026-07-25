@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { NumberInput } from "../../shared/NumberInput";
 import type { SunlightEntryCreate } from "../../../types";
@@ -6,6 +7,7 @@ import type { SunlightEntryCreate } from "../../../types";
 interface SunlightSectionProps {
   entries: SunlightEntryCreate[];
   onChange: (entries: SunlightEntryCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 // Typical illuminance values so users don't have to guess lux by hand
@@ -24,7 +26,11 @@ function nowTimeStr(): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:00`;
 }
 
-export function SunlightSection({ entries, onChange }: SunlightSectionProps) {
+export function SunlightSection({
+  entries,
+  onChange,
+  absence,
+}: SunlightSectionProps) {
   const addEntry = () =>
     onChange([
       ...entries,
@@ -45,6 +51,7 @@ export function SunlightSection({ entries, onChange }: SunlightSectionProps) {
       title="Sunlight"
       count={entries.length}
       storageKey="sunlight"
+      absence={absence}
     >
       {entries.map((entry, i) => (
         <div

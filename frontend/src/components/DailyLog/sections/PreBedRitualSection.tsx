@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { NumberInput } from "../../shared/NumberInput";
 import { SelectInput } from "../../shared/SelectInput";
@@ -8,11 +9,13 @@ import type { PreBedRitualCreate } from "../../../types";
 interface PreBedRitualSectionProps {
   entries: PreBedRitualCreate[];
   onChange: (entries: PreBedRitualCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 export function PreBedRitualSection({
   entries,
   onChange,
+  absence,
 }: PreBedRitualSectionProps) {
   const addEntry = () =>
     onChange([
@@ -33,6 +36,7 @@ export function PreBedRitualSection({
       title="Pre-Bed Rituals"
       count={entries.length}
       storageKey="rituals"
+      absence={absence}
     >
       {entries.map((entry, i) => (
         <div

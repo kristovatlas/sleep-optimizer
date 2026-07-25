@@ -1,4 +1,5 @@
 import { SectionWrapper } from "./SectionWrapper";
+import type { SectionAbsenceControl } from "./SectionWrapper";
 import { TimePicker } from "../../shared/TimePicker";
 import { SelectInput } from "../../shared/SelectInput";
 import { NumberInput } from "../../shared/NumberInput";
@@ -8,6 +9,7 @@ import type { NSDREntryCreate } from "../../../types";
 interface NSDRSectionProps {
   entries: NSDREntryCreate[];
   onChange: (entries: NSDREntryCreate[]) => void;
+  absence?: SectionAbsenceControl;
 }
 
 function nowTimeStr(): string {
@@ -15,7 +17,7 @@ function nowTimeStr(): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:00`;
 }
 
-export function NSDRSection({ entries, onChange }: NSDRSectionProps) {
+export function NSDRSection({ entries, onChange, absence }: NSDRSectionProps) {
   const addQuick = (minutes: number | null, type: NSDRType) =>
     onChange([
       ...entries,
@@ -31,7 +33,12 @@ export function NSDRSection({ entries, onChange }: NSDRSectionProps) {
     onChange(entries.map((e, i) => (i === index ? updated : e)));
 
   return (
-    <SectionWrapper title="NSDR" count={entries.length} storageKey="nsdr">
+    <SectionWrapper
+      title="NSDR"
+      count={entries.length}
+      storageKey="nsdr"
+      absence={absence}
+    >
       <div style={{ display: "flex", gap: "0.5rem" }}>
         {[10, 20, 30].map((min) => (
           <button

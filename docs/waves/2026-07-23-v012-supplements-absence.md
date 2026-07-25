@@ -121,17 +121,44 @@ management are Lane 3.
   restoring absences + product link. Tests: save-preserves-absence (+ its
   drop-the-omitted-key discrimination), save/copy product-link, export
   round-trip, library CRUD incl. delete-referenced-409.
-- **Lane 3b — Daily Log UI (frontend, off 3a) — TODO.** The v3 mock: generic
-  "None today" affordance per section + per-supplement "didn't take it", the
-  library pick UI (inline + settings + onboarding seed), #110 quick-add /
-  common-dose chips. Consumes the 3a write-path + library API.
-  **Contract (agreed, 3a review):** the daily-log PUT has REPLACE semantics for
-  `section_absences` exactly like every sub-entry list — the 3b client MUST
-  round-trip `section_absences` from GET into every PUT, or a save wipes the
-  day's absences. Between 3a and 3b the shipped UI doesn't create absences so
-  nothing user-visible is at risk, but 3b's first save-path test must cover it.
+- **Lane 3b — Daily Log UI (frontend, off 3a) — DONE (`feat/161-log-ui`).**
+  Built the owner-signed-off v3 design. Per-section "Mark none today" /
+  "Undo — restore today" (rust badge + dimmed body) on every absence-capable
+  section — the Habits section hosts per-key chips (exercise / alcohol /
+  blue_blockers / screens_off / sauna / warm_shower) since it spans six keys;
+  the toggle only shows while a section has no entries, and adding an entry
+  auto-clears its key (data supersedes absence). Supplements section rewritten:
+  rows = product name+meta, typeable decimal dose (± nudge at the library
+  step, unit label), per-entry time chip (set/clear), × remove; add-from-
+  library picker (type-to-filter) + minimal inline product create (name
+  required; brand/form/dose/unit/step/sticky); "⟲ Copy yesterday" (#110)
+  merges yesterday's rows — each source row claims a distinct matching
+  product row (split dosing copies as two rows, never collapses), the rest
+  append; sticky products auto-appear at default dose on a not-yet-saved
+  TODAY only (auto-filling a browsed blank past day would fabricate history),
+  re-applying on a return visit to a still-unsaved today.
+  **None-today data model (decided here): dose IS the state — per-supplement
+  "none today" is recorded ONLY as a 0-dose product-linked entry row, never as
+  a `supplement:<pid>` absence key.** A 0-dose entry aggregates to
+  `supplement_dose_<pid>` = 0.0 in Lane 2 (sum of [0.0]), identical to what an
+  absence key yields, so one canonical representation suffices and there is no
+  dual-write drift. The equivalence holds for timing too because a 0-dose row
+  never carries a time: Lane 2 samples `supplement_hbb_<pid>` from every
+  product entry's time regardless of dose, so the UI clears the time on every
+  path that lands a dose on 0 and offers no "+ time" chip on a none-today
+  row — `supplement_hbb_<pid>` stays NULL exactly as an absence key leaves it.
+  "Mark all none today" zeroes every product-linked row (times dropped;
+  legacy free-text rows untouched — 0 on an unlinked row has no analysis
+  meaning). Keys written by other clients still round-trip untouched.
+  **ROUND-TRIP CONTRACT enforced structurally:** `section_absences` is part of
+  `DailyLogCreate` form state, `outToCreate` carries it from every GET, and the
+  PUT sends the whole form — covered first by a dedicated regression test
+  (load absences → unrelated edit → save → keys still in the payload) plus a
+  Playwright reload-persistence spec. Library management in onboarding/
+  settings + seed list remain Lane 3c.
 
-**UX mockup → owner sign-off before build (3b).**
+**UX mockup → owner sign-off before build (3b): DONE (v3 mock signed off
+2026-07-23, #161 comments).**
 
 **BLOCKING write-path requirements (Codex P1/P2 on Lane 1, validated real —
 these MUST land atomically with the absence write-API so dev never has a

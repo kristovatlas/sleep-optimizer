@@ -1,8 +1,15 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { DailyLogPage } from "./DailyLogPage";
+import { addDays, todayStr } from "../../utils/date";
 
 const mockLogOut = {
   date: "2024-06-15",
@@ -20,6 +27,7 @@ const mockLogOut = {
   sunlight_entries: [],
   red_light_entries: [],
   nsdr_entries: [],
+  section_absences: [],
 };
 
 const mockSettings = {
@@ -36,20 +44,31 @@ const mockSettings = {
   onboarding_completed: true,
 };
 
-function mockFetch() {
+function mockFetch(
+  log: Record<string, unknown> = mockLogOut,
+  products: unknown[] = [],
+) {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const urlStr = typeof url === "string" ? url : url.toString();
     if (urlStr.includes("/api/settings")) {
       return new Response(JSON.stringify(mockSettings));
     }
+    if (urlStr.includes("/api/supplement-products")) {
+      return new Response(JSON.stringify(products));
+    }
     if (
       urlStr.includes("/api/daily-log/") &&
       (!init || !init.method || init.method === "GET")
     ) {
-      return new Response(JSON.stringify(mockLogOut));
+      return new Response(JSON.stringify(log));
     }
     if (urlStr.includes("/api/daily-log/") && init?.method === "PUT") {
-      return new Response(JSON.stringify({ data: mockLogOut, warnings: [] }));
+      // Echo the payload like the real backend does — a canned response
+      // would silently reset the form and mask round-trip bugs.
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ data: { ...log, ...body }, warnings: [] }),
+      );
     }
     if (urlStr.includes("/api/red-light-panels")) {
       return new Response(JSON.stringify([]));
@@ -58,6 +77,20 @@ function mockFetch() {
       status: 404,
     });
   });
+}
+
+/** The body of the most recent PUT to the daily-log endpoint. */
+function lastPutBody(): Record<string, unknown> {
+  const calls = vi.mocked(globalThis.fetch).mock.calls;
+  const puts = calls.filter(
+    ([, init]) => init && (init as RequestInit).method === "PUT",
+  );
+  expect(puts.length).toBeGreaterThan(0);
+  const [, init] = puts[puts.length - 1];
+  return JSON.parse(String((init as RequestInit).body)) as Record<
+    string,
+    unknown
+  >;
 }
 
 function renderPage(date = "2024-06-15") {
@@ -338,5 +371,673 @@ describe("DailyLogPage", () => {
     });
     expect(screen.getByText("Supplements")).toBeInTheDocument();
     expect(screen.getByText("Naps")).toBeInTheDocument();
+  });
+
+  // --- #159/#161: explicit absence — THE ROUND-TRIP CONTRACT ---
+  // The PUT replaces the day's section_absences wholesale, so every save
+  // must round-trip the loaded keys or an unrelated edit wipes them.
+
+  it("ROUND-TRIP CONTRACT: saving an unrelated edit keeps the day's absences", async () => {
+    mockFetch({ ...mockLogOut, section_absences: ["sauna", "alcohol"] });
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Edit something unrelated to any absence
+    await user.type(
+      screen.getByPlaceholderText("Any other notes about today..."),
+      "slept fine",
+    );
+    await user.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual(["sauna", "alcohol"]);
+    });
+  });
+
+  it("Mark none today puts the key in the payload; Undo removes it", async () => {
+    mockFetch();
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Caffeine section is open by default
+    await user.click(
+      screen.getByRole("button", { name: "Mark caffeine none today" }),
+    );
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual(["caffeine"]);
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Undo — restore caffeine today" }),
+    );
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual([]);
+    });
+  });
+
+  it("adding an entry clears that section's absence key", async () => {
+    mockFetch({ ...mockLogOut, section_absences: ["caffeine", "sauna"] });
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: "Undo — restore caffeine today" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByText("+ Espresso (63mg)"));
+    await user.click(screen.getByText("Save"));
+
+    await waitFor(() => {
+      // caffeine cleared by the new entry; unrelated sauna key survives
+      expect(lastPutBody().section_absences).toEqual(["sauna"]);
+    });
+  });
+
+  it("habit none-today chips toggle their own keys", async () => {
+    mockFetch();
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Habits")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Habits/ }));
+    await user.click(screen.getByRole("button", { name: "No sauna today" }));
+    await user.click(screen.getByRole("button", { name: "No alcohol today" }));
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual(["sauna", "alcohol"]);
+    });
+  });
+
+  // --- #161: supplement library integration ---
+
+  const stickyProduct = {
+    id: 5,
+    name: "Melatonin",
+    brand: "NOW",
+    form: null,
+    default_dose: 3,
+    unit: "mg",
+    step: 0.5,
+    is_sticky: true,
+  };
+
+  it("sticky products auto-populate a not-yet-saved TODAY at the default dose", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const today = todayStr();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes("/api/daily-log/") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            data: { ...mockLogOut, date: today, ...body },
+            warnings: [],
+          }),
+        );
+      }
+      // No log exists yet for the day
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage(today);
+
+    const dose = await screen.findByRole("spinbutton", {
+      name: "Melatonin dose (mg)",
+    });
+    expect(dose).toHaveValue(3);
+
+    // Being listed = took@default: the row rides the save payload
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().supplement_entries).toEqual([
+        { time: null, name: "Melatonin", dose_mg: 3, product_id: 5 },
+      ]);
+    });
+  });
+
+  it("sticky products do NOT populate a blank past day", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    renderPage("2024-06-15");
+
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("copy-yesterday pulls yesterday's supplement rows into the form", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes(`/api/daily-log/${yesterday}`)) {
+        return new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: yesterday,
+            supplement_entries: [
+              {
+                id: 11,
+                date: yesterday,
+                time: "21:30:00",
+                name: "Melatonin",
+                dose_mg: 2.5,
+                product_id: 5,
+              },
+            ],
+          }),
+        );
+      }
+      if (urlStr.includes("/api/daily-log/2024-06-15")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(2.5);
+    expect(screen.getByLabelText("Melatonin time")).toHaveDisplayValue("21:30");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Copied 1 supplement from yesterday",
+    );
+  });
+
+  /** Mock where the viewed day is blank and yesterday holds the given
+   * supplement rows. */
+  function mockYesterdaySupplements(
+    yesterday: string,
+    supplementEntries: unknown[],
+  ) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes(`/api/daily-log/${yesterday}`)) {
+        return new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: yesterday,
+            supplement_entries: supplementEntries,
+          }),
+        );
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+  }
+
+  it("copy-yesterday keeps split-dose rows distinct (two rows of one product)", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    mockYesterdaySupplements(yesterday, [
+      {
+        id: 11,
+        date: yesterday,
+        time: "09:00:00",
+        name: "Melatonin",
+        dose_mg: 200,
+        product_id: 5,
+      },
+      {
+        id: 12,
+        date: yesterday,
+        time: "22:00:00",
+        name: "Melatonin",
+        dose_mg: 200,
+        product_id: 5,
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+
+    // Two source rows → two destination rows — split dosing must not
+    // collapse into one via product re-matching
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      ).toHaveLength(2);
+    });
+    const times = screen.getAllByLabelText("Melatonin time");
+    expect(times[0]).toHaveDisplayValue("09:00");
+    expect(times[1]).toHaveDisplayValue("22:00");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Copied 2 supplements from yesterday",
+    );
+  });
+
+  it("copy-yesterday strips the time from a 0-dose (none today) row", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    // A pre-fix save could hold dose 0 alongside a time; copying it must
+    // not re-create the phantom timing sample
+    mockYesterdaySupplements(yesterday, [
+      {
+        id: 11,
+        date: yesterday,
+        time: "21:00:00",
+        name: "Melatonin",
+        dose_mg: 0,
+        product_id: 5,
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(0);
+    expect(screen.queryByLabelText("Melatonin time")).not.toBeInTheDocument();
+  });
+
+  it("sticky rows re-apply on a return visit to a still-unsaved today", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      // No day is saved anywhere
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage(todayStr());
+
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(3);
+
+    // Away to yesterday (blank past day: no sticky fabrication there) ...
+    await user.click(screen.getByRole("button", { name: "Previous day" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      ).not.toBeInTheDocument();
+    });
+
+    // ... and back: the 404 refetch reset the form, so sticky must re-apply
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+    expect(
+      await screen.findByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(3);
+    expect(
+      screen.getAllByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveLength(1); // applied once, not stacked
+  });
+
+  // --- stale-response guards: async supplement callbacks started on one
+  // day must not write into another day's form after navigation ---
+
+  it("a copy-DAY response landing after date navigation is discarded", async () => {
+    // Same stale-guard class for the CopyDayButton path: the copy POST
+    // commits server-side to day A; a late response must not replace day
+    // B's form (Save would PUT A's data onto B).
+    const dayA = "2024-06-15";
+    let resolveCopy: (r: Response) => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([]));
+      }
+      if (urlStr.includes("/copy-from/") && init?.method === "POST") {
+        return new Promise<Response>((res) => {
+          resolveCopy = res;
+        });
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage(dayA);
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Open the copy picker and start the copy on day A...
+    await user.click(
+      screen.getByRole("button", { name: "Copy from another day" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+    // ...then navigate to day B while the POST is in flight.
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+    const notesBefore = (screen.getByLabelText("Notes") as HTMLTextAreaElement)
+      .value;
+
+    await act(async () => {
+      resolveCopy(
+        new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: dayA,
+            notes: "COPIED-ONTO-WRONG-DAY",
+          }),
+        ),
+      );
+    });
+
+    // Day B's form must be untouched by day A's late copy response.
+    expect((screen.getByLabelText("Notes") as HTMLTextAreaElement).value).toBe(
+      notesBefore,
+    );
+    expect(
+      screen.queryByDisplayValue("COPIED-ONTO-WRONG-DAY"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a copy-yesterday response landing after date navigation is discarded", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const yesterday = addDays("2024-06-15", -1);
+    let resolveYesterday: (r: Response) => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        return new Response(JSON.stringify([]));
+      }
+      if (urlStr.includes(`/api/daily-log/${yesterday}`)) {
+        // Yesterday-of-A hangs until the test resolves it
+        return new Promise<Response>((res) => {
+          resolveYesterday = res;
+        });
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(JSON.stringify(mockLogOut));
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    // Start the copy on day A, then leave for day B while it is in flight
+    await user.click(
+      screen.getByRole("button", { name: "Copy yesterday's supplements" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+
+    await act(async () => {
+      resolveYesterday(
+        new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            date: yesterday,
+            supplement_entries: [
+              {
+                id: 11,
+                date: yesterday,
+                time: "21:30:00",
+                name: "Melatonin",
+                dose_mg: 2.5,
+                product_id: 5,
+              },
+            ],
+          }),
+        ),
+      );
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Day B's form is fully rendered and untouched — the stale rows did not
+    // merge in, and no copy status leaks onto a day the copy never touched
+    expect(screen.getByText("Save")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  /** Mock where the viewed days are blank (or hold the given supplement
+   * rows) and the product-create POST hangs until the test resolves it. */
+  function mockDeferredCreate(supplementEntries: unknown[] = []) {
+    let resolveCreate: (r: Response) => void = () => {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("/api/settings")) {
+        return new Response(JSON.stringify(mockSettings));
+      }
+      if (urlStr.includes("/api/supplement-products")) {
+        if (init?.method === "POST") {
+          return new Promise<Response>((res) => {
+            resolveCreate = res;
+          });
+        }
+        return new Response(JSON.stringify([stickyProduct]));
+      }
+      if (urlStr.includes("/api/daily-log/")) {
+        return new Response(
+          JSON.stringify({
+            ...mockLogOut,
+            supplement_entries: supplementEntries,
+          }),
+        );
+      }
+      return new Response(JSON.stringify({ detail: "Not found" }), {
+        status: 404,
+      });
+    });
+    return () => resolveCreate;
+  }
+
+  const apigenin = {
+    id: 9,
+    name: "Apigenin",
+    brand: null,
+    form: null,
+    default_dose: 50,
+    unit: "mg",
+    step: 0.5,
+    is_sticky: false,
+  };
+
+  /** Open the picker's create form, name the product, and submit. */
+  async function submitCreate(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      screen.getByRole("button", { name: "+ Add a supplement" }),
+    );
+    await user.click(screen.getByRole("button", { name: "+ New product" }));
+    await user.type(screen.getByLabelText("New product name"), "Apigenin");
+    await user.click(screen.getByRole("button", { name: "Add to library" }));
+  }
+
+  it("edits made while a product-create POST is pending survive its resolution", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const getResolve = mockDeferredCreate([
+      {
+        id: 1,
+        date: "2024-06-15",
+        time: null,
+        name: "Melatonin",
+        dose_mg: 3,
+        product_id: 5,
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await submitCreate(user);
+    // POST in flight — a concurrent edit to an existing row must not be
+    // lost to a pre-await entries snapshot when the create lands
+    fireEvent.change(
+      screen.getByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+      { target: { value: "7" } },
+    );
+
+    await act(async () => {
+      getResolve()(new Response(JSON.stringify(apigenin)));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Both survive: the concurrent edit AND the appended new row
+    expect(
+      screen.getByRole("spinbutton", { name: "Melatonin dose (mg)" }),
+    ).toHaveValue(7);
+    expect(
+      screen.getByRole("spinbutton", { name: "Apigenin dose (mg)" }),
+    ).toHaveValue(50);
+  });
+
+  it("a product-create response landing after date navigation appends nothing", async () => {
+    localStorage.setItem("somnus-section-supplements", "true");
+    const getResolve = mockDeferredCreate();
+    const user = userEvent.setup();
+    renderPage("2024-06-15");
+    await waitFor(() => {
+      expect(screen.getByText("Save")).toBeInTheDocument();
+    });
+
+    await submitCreate(user);
+    await user.click(screen.getByRole("button", { name: "Next day" }));
+
+    await act(async () => {
+      getResolve()(new Response(JSON.stringify(apigenin)));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Day B's form gains no row from day A's create...
+    expect(screen.getByText("Save")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("spinbutton", { name: "Apigenin dose (mg)" }),
+    ).not.toBeInTheDocument();
+    // ...but the library membership (date-independent) still applies
+    await user.click(
+      screen.getByRole("button", { name: "+ Add a supplement" }),
+    );
+    expect(
+      screen.getByRole("button", { name: /Apigenin/ }),
+    ).toBeInTheDocument();
+  });
+
+  // --- #159/#161: absence-only days on untracked sections stay visible ---
+
+  it("an untracked section with only a recorded absence renders and can be undone", async () => {
+    // Legacy bare array: caffeine and habits untracked
+    localStorage.setItem("somnus-tracked-sections", JSON.stringify(["meals"]));
+    mockFetch({ ...mockLogOut, section_absences: ["caffeine"] });
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Meals")).toBeInTheDocument();
+    });
+
+    // No entries, untracked — but the recorded "none today" must be
+    // visible, not invisible-and-unremovable
+    expect(screen.getByText("Caffeine")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Undo — restore caffeine today" }),
+    );
+    // Undo cleared the recorded state; nothing left → the untracked
+    // section hides again
+    await waitFor(() => {
+      expect(screen.queryByText("Caffeine")).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("Save"));
+    await waitFor(() => {
+      expect(lastPutBody().section_absences).toEqual([]);
+    });
+  });
+
+  it("untracked Habits renders when any habit absence key is recorded", async () => {
+    localStorage.setItem("somnus-tracked-sections", JSON.stringify(["meals"]));
+    mockFetch({ ...mockLogOut, section_absences: ["sauna"] });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Meals")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Habits")).toBeInTheDocument();
   });
 });
